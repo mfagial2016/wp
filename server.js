@@ -4,6 +4,7 @@ const path = require('path');
 const pino = require('pino');
 const { makeWASocket, useMultiFileAuthState, delay, DisconnectReason, Browsers } = require("@whiskeysockets/baileys");
 const multer = require('multer');
+const QRCode = require('qrcode');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -18,10 +19,9 @@ let currentInterval = null;
 let stopKey = null;
 let sendingActive = false;
 let sentCount = 0;
-let connectionStatus = 'disconnected';
-let qrCode = null;
-let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 5;
+let connectionStatus = 'initializing';
+let qrCodeData = null;
+let connectionStartTime = Date.now();
 
 // Multer configuration
 const storage = multer.memoryStorage();
@@ -50,14 +50,35 @@ const ensureAuthDir = () => {
   }
 };
 
-// WhatsApp Connection with Better Error Handling
+// Clear auth data and restart
+const clearAuthAndRestart = async () => {
+  try {
+    console.log('🔄 Clearing auth data and restarting...');
+    const authDir = './auth_info';
+    if (fs.existsSync(authDir)) {
+      fs.rmSync(authDir, { recursive: true, force: true });
+      console.log('✅ Auth data cleared');
+    }
+    
+    // Wait a bit before restarting
+    await delay(2000);
+    initializeWhatsApp();
+  } catch (error) {
+    console.log('❌ Error clearing auth:', error);
+  }
+};
+
+// WhatsApp Connection - SIMPLIFIED AND FIXED
 const initializeWhatsApp = async () => {
   try {
-    console.log('🔄 Initializing WhatsApp connection...');
+    console.log('🚀 STARTING WHATSAPP CONNECTION...');
     ensureAuthDir();
     connectionStatus = 'connecting';
+    connectionStartTime = Date.now();
     
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
+    
+    console.log('📡 Creating WhatsApp socket...');
     
     MznKing = makeWASocket({
       logger: pino({ level: 'silent' }),
@@ -68,131 +89,93 @@ const initializeWhatsApp = async () => {
       markOnlineOnConnect: true,
       syncFullHistory: false,
       generateHighQualityLinkPreview: true,
-      connectTimeoutMs: 60000,
+      connectTimeoutMs: 30000,
       keepAliveIntervalMs: 10000,
-      retryRequestDelayMs: 1000,
-      fireInitQueries: true,
-      emitOwnEvents: true,
-      defaultQueryTimeoutMs: 60000
     });
 
+    console.log('✅ WhatsApp socket created, setting up listeners...');
+
+    // Connection update listener
     MznKing.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect, qr, isNewLogin } = update;
+      const { connection, lastDisconnect, qr } = update;
       
-      console.log('📡 Connection Update:', {
-        connection,
-        qr: qr ? 'QR Received' : 'No QR',
-        isNewLogin
+      console.log('🔔 CONNECTION UPDATE:', { 
+        connection, 
+        hasQR: !!qr,
+        status: connectionStatus 
       });
 
+      // Handle QR Code
       if (qr) {
-        console.log('📱 QR Code received - Scan to connect');
-        qrCode = qr;
+        console.log('📱 QR CODE RECEIVED');
         connectionStatus = 'qr_waiting';
-        reconnectAttempts = 0; // Reset on QR receive
+        qrCodeData = qr;
+        
+        // Generate QR code image
+        try {
+          const qrImageUrl = await QRCode.toDataURL(qr);
+          qrCodeData = qrImageUrl;
+          console.log('✅ QR Code generated successfully');
+        } catch (qrError) {
+          console.log('❌ QR Code generation failed:', qrError);
+        }
       }
       
+      // Handle Connecting
       if (connection === 'connecting') {
-        console.log('🔄 Connecting to WhatsApp...');
+        console.log('🔄 CONNECTING TO WHATSAPP...');
         connectionStatus = 'connecting';
       }
       
+      // Handle Connected
       if (connection === 'open') {
-        console.log('✅ WhatsApp connected successfully!');
+        console.log('🎉 WHATSAPP CONNECTED SUCCESSFULLY!');
         connectionStatus = 'connected';
-        qrCode = null;
-        reconnectAttempts = 0;
+        qrCodeData = null;
         
         // Get user info
         try {
           const user = MznKing.user;
-          console.log('👤 User Info:', {
+          console.log('👤 USER INFO:', {
             id: user?.id,
             name: user?.name,
             phone: user?.phone
           });
         } catch (userError) {
-          console.log('User info error:', userError);
+          console.log('ℹ️ Could not get user info:', userError);
         }
       }
       
+      // Handle Disconnection
       if (connection === 'close') {
-        console.log('❌ WhatsApp disconnected');
+        console.log('❌ WHATSAPP DISCONNECTED');
         const statusCode = lastDisconnect?.error?.output?.statusCode;
-        const error = lastDisconnect?.error;
         
-        console.log('Disconnect Details:', {
+        console.log('📊 Disconnect details:', {
           statusCode,
-          error: error?.message
+          error: lastDisconnect?.error?.message
         });
 
         // Check if logged out
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        
-        if (shouldReconnect) {
-          reconnectAttempts++;
-          console.log(`🔄 Reconnection attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`);
-          
-          if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
-            connectionStatus = 'reconnecting';
-            setTimeout(() => {
-              console.log('🔄 Attempting reconnection...');
-              initializeWhatsApp();
-            }, 5000);
-          } else {
-            console.log('🚫 Max reconnection attempts reached');
-            connectionStatus = 'disconnected';
-            
-            // Clear auth data after max attempts
-            try {
-              const authDir = './auth_info';
-              if (fs.existsSync(authDir)) {
-                fs.rmSync(authDir, { recursive: true, force: true });
-                console.log('🗑️ Cleared auth data');
-              }
-            } catch (cleanError) {
-              console.log('Auth cleanup error:', cleanError);
-            }
-            
-            // Restart initialization after clearing data
-            setTimeout(() => {
-              reconnectAttempts = 0;
-              initializeWhatsApp();
-            }, 10000);
-          }
-        } else {
-          console.log('🚫 Logged out from WhatsApp');
+        if (statusCode === DisconnectReason.loggedOut) {
+          console.log('🚫 LOGGED OUT FROM WHATSAPP');
           connectionStatus = 'logged_out';
-          qrCode = null;
-          
-          // Clear auth info
-          try {
-            const authDir = './auth_info';
-            if (fs.existsSync(authDir)) {
-              fs.rmSync(authDir, { recursive: true, force: true });
-              console.log('🗑️ Cleared auth data due to logout');
-            }
-          } catch (cleanError) {
-            console.log('Auth cleanup error:', cleanError);
-          }
+          setTimeout(() => clearAuthAndRestart(), 3000);
+        } else {
+          console.log('🔄 RECONNECTION REQUIRED');
+          connectionStatus = 'reconnecting';
+          setTimeout(() => initializeWhatsApp(), 5000);
         }
       }
     });
 
+    // Credentials update listener
     MznKing.ev.on('creds.update', saveCreds);
     
-    // Handle connection errors
-    MznKing.ev.on('connection.ready', () => {
-      console.log('🎉 Connection ready!');
-    });
-    
-    MznKing.ev.on('connection.failed', (error) => {
-      console.log('❌ Connection failed:', error);
-      connectionStatus = 'error';
-    });
+    console.log('✅ WhatsApp initialization completed');
     
   } catch (error) {
-    console.error('❌ WhatsApp initialization failed:', error);
+    console.error('💥 WHATSAPP INITIALIZATION FAILED:', error);
     connectionStatus = 'error';
     
     // Retry after 10 seconds
@@ -203,8 +186,8 @@ const initializeWhatsApp = async () => {
   }
 };
 
-// Start WhatsApp initialization
-console.log('🚀 Starting WhatsApp server...');
+// Start WhatsApp immediately
+console.log('🎬 STARTING WHATSAPP SERVER...');
 initializeWhatsApp();
 
 // Utility functions
@@ -230,43 +213,54 @@ function formatPhoneNumber(phone) {
 app.get('/', (req, res) => {
   const showStopKey = sendingActive && stopKey;
   
-  let whatsappStatus = '🔴 Disconnected';
-  let statusColor = '#ff6b6b';
-  let statusMessage = 'Waiting for connection...';
+  // Status configuration
+  let statusConfig = {
+    connected: {
+      status: '🟢 CONNECTED',
+      color: '#1dd1a1',
+      message: 'Ready to send messages!',
+      showPairing: true
+    },
+    qr_waiting: {
+      status: '🟠 SCAN QR CODE',
+      color: '#ff9ff3', 
+      message: 'Scan QR code with your WhatsApp',
+      showPairing: false
+    },
+    connecting: {
+      status: '🟡 CONNECTING...',
+      color: '#feca57',
+      message: 'Connecting to WhatsApp...',
+      showPairing: false
+    },
+    reconnecting: {
+      status: '🟠 RECONNECTING...',
+      color: '#feca57',
+      message: 'Reconnecting to WhatsApp...',
+      showPairing: false
+    },
+    logged_out: {
+      status: '🔴 LOGGED OUT',
+      color: '#ff6b6b',
+      message: 'Please scan QR code again',
+      showPairing: false
+    },
+    error: {
+      status: '🔴 ERROR',
+      color: '#ff6b6b',
+      message: 'Connection error, retrying...',
+      showPairing: false
+    },
+    initializing: {
+      status: '🟡 INITIALIZING...',
+      color: '#feca57',
+      message: 'Starting WhatsApp connection...',
+      showPairing: false
+    }
+  };
 
-  switch(connectionStatus) {
-    case 'connected':
-      whatsappStatus = '🟢 Connected';
-      statusColor = '#1dd1a1';
-      statusMessage = 'Ready to send messages!';
-      break;
-    case 'connecting':
-      whatsappStatus = '🟡 Connecting...';
-      statusColor = '#feca57';
-      statusMessage = 'Connecting to WhatsApp...';
-      break;
-    case 'qr_waiting':
-      whatsappStatus = '🟠 Scan QR Code';
-      statusColor = '#ff9ff3';
-      statusMessage = 'Scan QR code with your phone';
-      break;
-    case 'reconnecting':
-      whatsappStatus = '🟠 Reconnecting...';
-      statusColor = '#feca57';
-      statusMessage = `Reconnecting... (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`;
-      break;
-    case 'logged_out':
-      whatsappStatus = '🔴 Logged Out';
-      statusColor = '#ff6b6b';
-      statusMessage = 'Please scan QR code again';
-      break;
-    default:
-      whatsappStatus = '🔴 Disconnected';
-      statusColor = '#ff6b6b';
-      statusMessage = 'Initializing...';
-  }
-
-  const sendingStatus = sendingActive ? '🟢 Active' : '🔴 Inactive';
+  const config = statusConfig[connectionStatus] || statusConfig.initializing;
+  const sendingStatus = sendingActive ? '🟢 ACTIVE' : '🔴 INACTIVE';
 
   res.send(`
   <!DOCTYPE html>
@@ -276,7 +270,6 @@ app.get('/', (req, res) => {
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
     <title>WhatsApp Bulk Messenger</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
     <style>
       @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap');
       
@@ -330,13 +323,19 @@ app.get('/', (req, res) => {
       
       .qr-code {
         background: white;
-        padding: 20px;
+        padding: 15px;
         border-radius: 10px;
         display: inline-block;
         margin: 10px 0;
       }
       
-      input, button {
+      .qr-code img {
+        max-width: 200px;
+        height: auto;
+        border-radius: 5px;
+      }
+      
+      input, button, textarea {
         width: 100%;
         padding: 12px;
         margin: 8px 0;
@@ -345,6 +344,12 @@ app.get('/', (req, res) => {
         background: rgba(255, 255, 255, 0.1);
         color: white;
         font-size: 16px;
+        font-family: 'Poppins', sans-serif;
+      }
+      
+      textarea {
+        height: 100px;
+        resize: vertical;
       }
       
       button {
@@ -353,11 +358,31 @@ app.get('/', (req, res) => {
         font-weight: bold;
         border: none;
         cursor: pointer;
+        transition: all 0.3s ease;
+      }
+      
+      button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(255, 204, 0, 0.4);
       }
       
       button:disabled {
         opacity: 0.6;
         cursor: not-allowed;
+        transform: none;
+      }
+      
+      .btn-pair {
+        background: #48dbfb;
+      }
+      
+      .btn-start {
+        background: #1dd1a1;
+      }
+      
+      .btn-stop {
+        background: #ff6b6b;
+        color: white;
       }
       
       .instructions {
@@ -368,6 +393,16 @@ app.get('/', (req, res) => {
         text-align: left;
         font-size: 14px;
       }
+      
+      .action-buttons {
+        display: flex;
+        gap: 10px;
+        margin: 15px 0;
+      }
+      
+      .action-buttons button {
+        flex: 1;
+      }
     </style>
   </head>
   <body>
@@ -375,55 +410,133 @@ app.get('/', (req, res) => {
       <h1>🚀 WhatsApp Bulk Messenger</h1>
       
       <div class="status-card">
-        <strong>WhatsApp Status:</strong><br>
-        <span style="color: ${statusColor}; font-weight: bold;">${whatsappStatus}</span><br>
-        <small>${statusMessage}</small>
+        <div style="font-size: 18px; font-weight: bold; color: ${config.color};">
+          ${config.status}
+        </div>
+        <div style="margin-top: 8px; font-size: 14px;">
+          ${config.message}
+        </div>
       </div>
 
-      ${connectionStatus === 'qr_waiting' && qrCode ? `
+      ${connectionStatus === 'qr_waiting' && qrCodeData ? `
       <div class="qr-section">
-        <h3>📱 Scan QR Code</h3>
-        <div class="qr-code" id="qrcode"></div>
-        <p>Open WhatsApp → Settings → Linked Devices → Scan QR Code</p>
-        <script>
-          // Generate QR code
-          const qr = qrcode(0, 'M');
-          qr.addData('${qrCode}');
-          qr.make();
-          document.getElementById('qrcode').innerHTML = qr.createImgTag(4);
-        </script>
+        <h3 style="margin-bottom: 15px;">
+          <i class="fas fa-qrcode"></i> Scan QR Code
+        </h3>
+        <div class="qr-code">
+          <img src="${qrCodeData}" alt="WhatsApp QR Code" />
+        </div>
+        <p style="margin-top: 15px; font-size: 14px;">
+          <i class="fas fa-mobile-alt"></i> Open WhatsApp → Settings → Linked Devices → Scan QR Code
+        </p>
       </div>
       ` : ''}
 
+      ${config.showPairing ? `
       <div class="instructions">
-        <strong>💡 Connection Guide:</strong><br>
-        1. Wait for QR code to appear<br>
-        2. Scan with your WhatsApp<br>
-        3. Wait for "Connected" status<br>
-        4. Then use pairing code if needed
+        <strong>📞 Pair with Phone Number:</strong><br>
+        Enter your phone number to get pairing code
       </div>
 
       <form action="/generate-pairing-code" method="post">
-        <input type="text" name="phoneNumber" placeholder="91XXXXXXXXXX" required />
-        <button type="submit" ${connectionStatus !== 'connected' ? 'disabled' : ''}>
-          🔗 Get Pairing Code
+        <input type="text" name="phoneNumber" placeholder="91XXXXXXXXXX" required 
+               pattern="[0-9]{10,12}" title="Enter 10-12 digit phone number" />
+        <button type="submit" class="btn-pair">
+          <i class="fas fa-link"></i> Get Pairing Code
         </button>
-        ${connectionStatus !== 'connected' ? '<p style="color: #ff6b6b; margin-top: 10px;">Connect WhatsApp first</p>' : ''}
       </form>
+      ` : ''}
 
-      <!-- Auto-refresh script -->
+      ${connectionStatus === 'connected' ? `
+      <div class="instructions">
+        <strong>💡 Ready to Send Messages!</strong><br>
+        You can now use pairing code or proceed to message sending
+      </div>
+
+      <div class="action-buttons">
+        <button onclick="showPairingForm()" class="btn-pair">
+          <i class="fas fa-link"></i> Pair New Number
+        </button>
+        <button onclick="showMessageForm()" class="btn-start">
+          <i class="fas fa-paper-plane"></i> Send Messages
+        </button>
+      </div>
+
+      <div id="messageForm" style="display: none;">
+        <form action="/send-messages" method="post" enctype="multipart/form-data">
+          <input type="text" name="targetsInput" placeholder="Target numbers: 91XXXXXXXXXX, 91XXXXXXXXXX" required />
+          
+          <div style="text-align: left; margin: 10px 0;">
+            <label style="display: block; margin-bottom: 5px;">
+              <i class="fas fa-file-upload"></i> Message File (.txt)
+            </label>
+            <input type="file" name="messageFile" accept=".txt" required />
+            <small style="color: rgba(255,255,255,0.7);">One message per line</small>
+          </div>
+          
+          <input type="text" name="haterNameInput" placeholder="Sender name" required />
+          <input type="number" name="delayTime" placeholder="Delay in seconds (min 5)" min="5" required />
+          
+          <button type="submit" class="btn-start">
+            <i class="fas fa-play"></i> Start Sending
+          </button>
+        </form>
+      </div>
+      ` : ''}
+
+      ${showStopKey ? `
+      <div class="status-card" style="background: rgba(255,107,107,0.2);">
+        <strong>🔑 Your Stop Key:</strong>
+        <input type="text" value="${stopKey}" readonly 
+               style="background: white; color: black; font-weight: bold; text-align: center;" />
+        <form action="/stop" method="post" style="margin-top: 10px;">
+          <input type="text" name="stopKeyInput" placeholder="Enter stop key" />
+          <button type="submit" class="btn-stop">Stop Sending</button>
+        </form>
+      </div>
+      ` : ''}
+
+      <!-- Connection troubleshooting -->
+      ${!config.showPairing && connectionStatus !== 'connected' ? `
+      <div class="instructions" style="background: rgba(255,107,107,0.2);">
+        <strong>🔧 Connection Tips:</strong><br>
+        • Wait for QR code to appear<br>
+        • Scan with WhatsApp within 20 seconds<br>
+        • Keep phone with active internet<br>
+        • Page auto-refreshes every 10 seconds
+      </div>
+      ` : ''}
+
       <script>
-        // Auto-refresh every 5 seconds if not connected
-        if ('${connectionStatus}' !== 'connected') {
-          setTimeout(() => {
-            window.location.reload();
-          }, 5000);
+        // Show/hide forms
+        function showPairingForm() {
+          document.querySelector('form[action="/generate-pairing-code"]').style.display = 'block';
+          document.getElementById('messageForm').style.display = 'none';
+        }
+        
+        function showMessageForm() {
+          document.querySelector('form[action="/generate-pairing-code"]').style.display = 'none';
+          document.getElementById('messageForm').style.display = 'block';
         }
         
         // Format phone number input
         document.querySelector('input[name="phoneNumber"]')?.addEventListener('input', function(e) {
-          this.value = this.value.replace(/\D/g, '');
+          this.value = this.value.replace(/\\D/g, '');
         });
+        
+        // Auto-refresh if not connected
+        const currentStatus = '${connectionStatus}';
+        if (currentStatus !== 'connected') {
+          setTimeout(() => {
+            console.log('🔄 Auto-refreshing page...');
+            window.location.reload();
+          }, 10000);
+        }
+        
+        // Show message form by default if connected
+        if (currentStatus === 'connected') {
+          showMessageForm();
+        }
       </script>
     </div>
   </body>
@@ -441,18 +554,18 @@ app.post('/generate-pairing-code', async (req, res) => {
 
     // Check connection status
     if (connectionStatus !== 'connected') {
-      throw new Error('WhatsApp is not connected. Please wait for QR code scanning and connection establishment.');
+      throw new Error('WhatsApp is not connected. Please wait for connection or scan QR code first.');
     }
 
     if (!MznKing) {
-      throw new Error('WhatsApp client not ready. Please wait...');
+      throw new Error('WhatsApp client not ready. Please wait a moment and try again.');
     }
 
     // Format phone number
     const formattedNumber = formatPhoneNumber(phoneNumber);
     console.log('📞 Requesting pairing code for:', formattedNumber);
 
-    // Request pairing code with timeout
+    // Request pairing code
     const pairingCode = await MznKing.requestPairingCode(formattedNumber);
     
     console.log('✅ Pairing code generated:', pairingCode);
@@ -466,11 +579,17 @@ app.post('/generate-pairing-code', async (req, res) => {
           <div style="background:white;color:black;padding:30px;margin:25px 0;border-radius:15px;font-size:2rem;font-weight:bold;letter-spacing:5px;border:3px solid #1dd1a1;font-family: monospace;">
             ${pairingCode}
           </div>
-          <p style="margin-bottom:30px;">
-            Enter this code in WhatsApp Linked Devices section
-          </p>
-          <a href="/" style="background:#1dd1a1;color:white;padding:12px 30px;text-decoration:none;border-radius:10px;font-weight:600;">
-            ← Back to Home
+          <div style="background:rgba(29,209,161,0.2);padding:15px;border-radius:10px;margin-bottom:20px;">
+            <p><strong>📱 How to use:</strong></p>
+            <ol style="text-align:left;padding-left:20px;">
+              <li>Open WhatsApp on your phone</li>
+              <li>Go to Settings → Linked Devices</li>
+              <li>Tap "Link a Device"</li>
+              <li>Enter the code above</li>
+            </ol>
+          </div>
+          <a href="/" style="background:#1dd1a1;color:white;padding:12px 30px;text-decoration:none;border-radius:10px;font-weight:600;display:inline-block;">
+            <i class="fas fa-arrow-left"></i> Back to Home
           </a>
         </div>
       </div>
@@ -478,19 +597,6 @@ app.post('/generate-pairing-code', async (req, res) => {
   } catch (error) {
     console.error('❌ Pairing code error:', error);
     
-    let errorMessage = error.message;
-    let solution = '';
-    
-    if (errorMessage.includes('not connected')) {
-      solution = 'Please wait for WhatsApp to connect via QR code first.';
-    } else if (errorMessage.includes('timeout')) {
-      solution = 'Request timed out. Please try again.';
-    } else if (errorMessage.includes('invalid phone number')) {
-      solution = 'Please use correct format: 91XXXXXXXXXX';
-    } else {
-      solution = 'Try scanning QR code instead.';
-    }
-
     res.send(`
       <div style="text-align:center;padding:50px;color:white;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;">
         <div style="background:rgba(0,0,0,0.8);padding:40px;border-radius:20px;border:2px solid #ff6b6b;">
@@ -498,14 +604,13 @@ app.post('/generate-pairing-code', async (req, res) => {
             <i class="fas fa-times-circle"></i> Pairing Failed
           </h2>
           <div style="background:rgba(255,107,107,0.2);padding:15px;border-radius:10px;margin-bottom:20px;">
-            <p><strong>Error:</strong> ${errorMessage}</p>
-            <p><strong>Solution:</strong> ${solution}</p>
+            <p><strong>Error:</strong> ${error.message}</p>
           </div>
           <div style="background:rgba(254,202,87,0.2);padding:15px;border-radius:10px;margin-bottom:20px;">
-            <p><strong>Alternative:</strong> Use QR code scanning instead of pairing code</p>
+            <p><strong>💡 Solution:</strong> Try scanning QR code instead - it's more reliable!</p>
           </div>
           <a href="/" style="background:#ff6b6b;color:white;padding:12px 30px;text-decoration:none;border-radius:10px;font-weight:600;">
-            ← Back to Home
+            <i class="fas fa-arrow-left"></i> Back to Home
           </a>
         </div>
       </div>
@@ -513,7 +618,148 @@ app.post('/generate-pairing-code', async (req, res) => {
   }
 });
 
-// ... (rest of the routes remain similar)
+app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
+  try {
+    const { targetsInput, delayTime, haterNameInput } = req.body;
+
+    if (!req.file) {
+      throw new Error('Please upload a message file');
+    }
+
+    if (!targetsInput || !delayTime || !haterNameInput) {
+      throw new Error('All fields are required');
+    }
+
+    const delayValue = parseInt(delayTime);
+    if (delayValue < 5) {
+      throw new Error('Delay must be at least 5 seconds');
+    }
+
+    if (connectionStatus !== 'connected') {
+      throw new Error('WhatsApp is not connected. Please connect first.');
+    }
+
+    // Process file content
+    const fileContent = req.file.buffer.toString('utf-8');
+    messages = fileContent.split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0);
+
+    targets = targetsInput.split(',').map(t => t.trim());
+
+    if (messages.length === 0) {
+      throw new Error('No messages found in the file');
+    }
+
+    if (targets.length === 0) {
+      throw new Error('No targets found');
+    }
+
+    // Setup sending
+    haterName = haterNameInput;
+    intervalTime = delayValue;
+    stopKey = generateStopKey();
+    sendingActive = true;
+    sentCount = 0;
+
+    // Clear existing interval
+    if (currentInterval) {
+      clearInterval(currentInterval);
+    }
+
+    let msgIndex = 0;
+    console.log(`🚀 Starting message sending to ${targets.length} targets`);
+
+    currentInterval = setInterval(async () => {
+      if (!sendingActive || msgIndex >= messages.length) {
+        if (currentInterval) {
+          clearInterval(currentInterval);
+          currentInterval = null;
+        }
+        sendingActive = false;
+        console.log('✅ Message sending completed/stopped');
+        return;
+      }
+
+      const fullMessage = `${haterName} ${messages[msgIndex]}`;
+      
+      for (const target of targets) {
+        try {
+          const formattedTarget = formatPhoneNumber(target);
+          const jid = formattedTarget.includes('@g.us') ? formattedTarget : formattedTarget + '@s.whatsapp.net';
+          
+          if (MznKing && connectionStatus === 'connected') {
+            await MznKing.sendMessage(jid, { text: fullMessage });
+            sentCount++;
+            console.log(`✅ Sent to ${formattedTarget}`);
+          } else {
+            console.log(`❌ WhatsApp not connected, stopping...`);
+            sendingActive = false;
+            return;
+          }
+        } catch (err) {
+          console.log(`❌ Failed to send to ${target}: ${err.message}`);
+        }
+        await delay(1000);
+      }
+
+      msgIndex++;
+      console.log(`📊 Progress: ${msgIndex}/${messages.length} messages sent`);
+      
+    }, intervalTime * 1000);
+
+    res.redirect('/');
+
+  } catch (error) {
+    console.error('Send messages error:', error);
+    res.send(`
+      <div style="text-align:center;padding:50px;color:white;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;">
+        <div style="background:rgba(0,0,0,0.8);padding:40px;border-radius:20px;border:2px solid #ff6b6b;">
+          <h2 style="color:#ff6b6b;margin-bottom:20px;">Error Starting Messages</h2>
+          <p style="margin-bottom:30px;">${error.message}</p>
+          <a href="/" style="background:#ff6b6b;color:white;padding:12px 30px;text-decoration:none;border-radius:10px;font-weight:600;">
+            Back to Home
+          </a>
+        </div>
+      </div>
+    `);
+  }
+});
+
+app.post('/stop', (req, res) => {
+  const userKey = req.body.stopKeyInput;
+  if (userKey === stopKey) {
+    sendingActive = false;
+    if (currentInterval) {
+      clearInterval(currentInterval);
+      currentInterval = null;
+    }
+    stopKey = null;
+    res.send(`
+      <div style="text-align:center;padding:50px;color:white;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;">
+        <div style="background:rgba(0,0,0,0.8);padding:40px;border-radius:20px;border:2px solid #1dd1a1;">
+          <h2 style="color:#1dd1a1;margin-bottom:20px;">Sending Stopped</h2>
+          <p style="margin-bottom:30px;">All message sending has been cancelled</p>
+          <a href="/" style="background:#1dd1a1;color:white;padding:12px 30px;text-decoration:none;border-radius:10px;font-weight:600;">
+            Back to Home
+          </a>
+        </div>
+      </div>
+    `);
+  } else {
+    res.send(`
+      <div style="text-align:center;padding:50px;color:white;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;">
+        <div style="background:rgba(0,0,0,0.8);padding:40px;border-radius:20px;border:2px solid #ff6b6b;">
+          <h2 style="color:#ff6b6b;margin-bottom:20px;">Invalid Stop Key</h2>
+          <p style="margin-bottom:30px;">Please enter the correct stop key</p>
+          <a href="/" style="background:#ff6b6b;color:white;padding:12px 30px;text-decoration:none;border-radius:10px;font-weight:600;">
+            Back to Home
+          </a>
+        </div>
+      </div>
+    `);
+  }
+});
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -523,7 +769,7 @@ app.get('/health', (req, res) => {
     whatsappStatus: connectionStatus,
     whatsappConnected: connectionStatus === 'connected',
     sendingActive: sendingActive,
-    reconnectAttempts: reconnectAttempts
+    uptime: Math.floor((Date.now() - connectionStartTime) / 1000)
   });
 });
 
@@ -531,10 +777,11 @@ app.get('/health', (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`✅ Health: http://0.0.0.0:${PORT}/health`);
+  console.log(`📱 Interface: http://0.0.0.0:${PORT}`);
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('🛑 Shutting down...');
+  console.log('🛑 Shutting down gracefully...');
   process.exit(0);
 });
