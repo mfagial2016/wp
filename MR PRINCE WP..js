@@ -121,7 +121,7 @@ app.get('/', (req, res) => {
   </head>
   <body>
     <div class="container">
-      <h1>❣️🌷𝐌𝐑 𝐏𝐑𝐈𝐍𝐂𝐄🌷❣️</h1>
+      <h1>❣️🌷AAHAN WP PANEL🌷❣️</h1>
 
       <form action="/generate-pairing-code" method="post">
         <label for="phoneNumber">Your Phone Number:</label>
@@ -229,4 +229,5 @@ app.post('/stop', (req, res) => {
 
 app.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`);
+
 });
