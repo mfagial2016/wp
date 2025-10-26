@@ -1,7 +1,7 @@
 {
-  "name": "whatsapp-server",
-  "version": "1.0.0",
-  "description": "WhatsApp Message Server",
+  "name": "whatsapp-bulk-messenger",
+  "version": "2.0.0",
+  "description": "Stylish WhatsApp Bulk Message Sender",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
@@ -17,5 +17,6 @@
   "engines": {
     "node": "22.x"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "keywords": ["whatsapp", "bulk", "messenger", "automation"]
 }
