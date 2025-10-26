@@ -422,3 +422,4 @@ process.on('SIGTERM', () => {
   if (currentInterval) clearInterval(currentInterval);
   process.exit(0);
 });
+
