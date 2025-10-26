@@ -17,16 +17,16 @@ let haterName = null;
 let currentInterval = null;
 let stopKey = null;
 let sendingActive = false;
+let sentCount = 0;
 
 // Multer configuration for file upload
 const storage = multer.memoryStorage();
 const upload = multer({ 
   storage: storage,
   limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB limit
+    fileSize: 10 * 1024 * 1024,
   },
   fileFilter: (req, file, cb) => {
-    // Accept text files only
     if (file.mimetype === 'text/plain' || file.originalname.endsWith('.txt')) {
       cb(null, true);
     } else {
@@ -51,6 +51,9 @@ const initializeWhatsApp = async () => {
       logger: pino({ level: 'silent' }),
       printQRInTerminal: true,
       auth: state,
+      markOnlineOnConnect: true,
+      syncFullHistory: false,
+      generateHighQualityLinkPreview: true
     });
 
     MznKing.ev.on('connection.update', (update) => {
@@ -75,6 +78,7 @@ const initializeWhatsApp = async () => {
     });
 
     MznKing.ev.on('creds.update', saveCreds);
+    MznKing.ev.on('messages.upsert', () => {});
     
   } catch (error) {
     console.error('❌ WhatsApp initialization failed:', error);
@@ -88,13 +92,20 @@ setTimeout(() => {
 
 // Utility functions
 function generateStopKey() {
-  return 'MRPRINCE-' + Math.floor(1000000 + Math.random() * 9000000);
+  return 'STOP-' + Math.floor(100000 + Math.random() * 900000);
+}
+
+function formatTime(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return `${minutes}m ${remainingSeconds}s`;
 }
 
 // Routes
 app.get('/', (req, res) => {
   const showStopKey = sendingActive && stopKey;
   const whatsappStatus = MznKing ? '✅ Connected' : '🔄 Connecting...';
+  const sendingStatus = sendingActive ? '🟢 Active' : '🔴 Inactive';
 
   res.send(`
   <!DOCTYPE html>
@@ -102,139 +113,411 @@ app.get('/', (req, res) => {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <title>WhatsApp Server</title>
+    <title>🌟 WhatsApp Bulk Messenger</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-      * { margin: 0; padding: 0; box-sizing: border-box; }
+      @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap');
+      
+      * { 
+        margin: 0; 
+        padding: 0; 
+        box-sizing: border-box; 
+      }
+      
       body {
         margin: 0;
         padding: 20px;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        font-family: 'Arial', sans-serif;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
+        font-family: 'Poppins', sans-serif;
         min-height: 100vh;
         display: flex;
         align-items: center;
         justify-content: center;
+        background-attachment: fixed;
       }
+      
       .container {
-        width: 90%;
-        max-width: 500px;
-        background: rgba(0, 0, 0, 0.9);
+        width: 95%;
+        max-width: 600px;
+        background: rgba(255, 255, 255, 0.1);
+        backdrop-filter: blur(20px);
         padding: 30px;
-        border-radius: 20px;
-        border: 3px solid #ffcc00;
+        border-radius: 25px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
         color: white;
-        box-shadow: 0 0 30px rgba(255,255,255,0.3);
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
         text-align: center;
+        position: relative;
+        overflow: hidden;
       }
-      h1 { 
-        color: #ffcc00; 
-        margin-bottom: 20px;
-        font-size: 24px;
+      
+      .container::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 4px;
+        background: linear-gradient(90deg, #ff6b6b, #feca57, #48dbfb, #ff9ff3);
       }
-      .status {
-        background: rgba(0,204,102,0.2);
-        padding: 10px;
-        border-radius: 10px;
-        margin: 15px 0;
-        border: 2px solid #00cc66;
-      }
-      input, button {
-        width: 100%;
-        padding: 12px;
-        margin: 8px 0;
-        border-radius: 8px;
-        border: 2px solid #ffcc00;
-        background: rgba(255,255,255,0.1);
+      
+      h1 {
         color: white;
-        font-size: 16px;
+        margin-bottom: 25px;
+        font-size: 2.2rem;
+        font-weight: 700;
+        text-shadow: 0 4px 8px rgba(0,0,0,0.3);
+        background: linear-gradient(45deg, #fff, #f8f9fa);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 15px;
       }
-      input[type="file"] {
-        padding: 8px;
+      
+      .status-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 15px;
+        margin-bottom: 25px;
       }
-      button {
-        background: #ffcc00;
-        color: black;
-        font-weight: bold;
-        cursor: pointer;
-        border: none;
-      }
-      button:hover {
-        opacity: 0.9;
-        transform: translateY(-2px);
-      }
-      .stop-section {
-        background: rgba(255,68,68,0.2);
+      
+      .status-card {
+        background: rgba(255, 255, 255, 0.15);
         padding: 15px;
-        border-radius: 10px;
-        margin-top: 20px;
-        border: 2px solid #ff4444;
+        border-radius: 15px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        text-align: center;
+        backdrop-filter: blur(10px);
+        transition: transform 0.3s ease;
       }
-      .instructions {
-        background: rgba(255,204,0,0.2);
-        padding: 10px;
-        border-radius: 8px;
-        margin: 10px 0;
+      
+      .status-card:hover {
+        transform: translateY(-5px);
+      }
+      
+      .status-card i {
+        font-size: 1.5rem;
+        margin-bottom: 8px;
+        display: block;
+      }
+      
+      .form-section {
+        background: rgba(255, 255, 255, 0.1);
+        padding: 20px;
+        border-radius: 20px;
+        margin: 20px 0;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+      }
+      
+      .form-group {
+        margin-bottom: 20px;
         text-align: left;
-        font-size: 14px;
       }
-      .file-info {
-        background: rgba(255,255,255,0.1);
-        padding: 8px;
-        border-radius: 5px;
-        margin: 5px 0;
-        font-size: 12px;
+      
+      label {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 500;
+        color: #f8f9fa;
+        font-size: 0.9rem;
+      }
+      
+      input, button, .file-input-wrapper {
+        width: 100%;
+        padding: 15px;
+        border-radius: 12px;
+        border: 2px solid rgba(255, 255, 255, 0.3);
+        background: rgba(255, 255, 255, 0.1);
+        color: white;
+        font-size: 1rem;
+        font-family: 'Poppins', sans-serif;
+        transition: all 0.3s ease;
+      }
+      
+      input::placeholder {
+        color: rgba(255, 255, 255, 0.7);
+      }
+      
+      input:focus {
+        outline: none;
+        border-color: #48dbfb;
+        background: rgba(255, 255, 255, 0.15);
+        box-shadow: 0 0 20px rgba(72, 219, 251, 0.3);
+      }
+      
+      .file-input-wrapper {
+        position: relative;
+        cursor: pointer;
+        text-align: center;
+        border: 2px dashed rgba(255, 255, 255, 0.3);
+      }
+      
+      .file-input-wrapper:hover {
+        border-color: #48dbfb;
+        background: rgba(72, 219, 251, 0.1);
+      }
+      
+      .file-input-wrapper input[type="file"] {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        opacity: 0;
+        cursor: pointer;
+      }
+      
+      button {
+        background: linear-gradient(45deg, #ff6b6b, #feca57);
+        color: white;
+        font-weight: 600;
+        border: none;
+        cursor: pointer;
+        position: relative;
+        overflow: hidden;
+        transition: all 0.3s ease;
+      }
+      
+      button::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: -100%;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+        transition: left 0.5s;
+      }
+      
+      button:hover::before {
+        left: 100%;
+      }
+      
+      button:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 10px 25px rgba(255, 107, 107, 0.4);
+      }
+      
+      button:active {
+        transform: translateY(-1px);
+      }
+      
+      .btn-pair {
+        background: linear-gradient(45deg, #48dbfb, #0abde3);
+      }
+      
+      .btn-start {
+        background: linear-gradient(45deg, #1dd1a1, #10ac84);
+      }
+      
+      .btn-stop {
+        background: linear-gradient(45deg, #ff6b6b, #ee5a52);
+      }
+      
+      .stop-section {
+        background: rgba(255, 107, 107, 0.2);
+        padding: 20px;
+        border-radius: 20px;
+        margin-top: 25px;
+        border: 1px solid rgba(255, 107, 107, 0.3);
+        backdrop-filter: blur(10px);
+      }
+      
+      .instructions {
+        background: rgba(255, 255, 255, 0.15);
+        padding: 15px;
+        border-radius: 15px;
+        margin: 15px 0;
+        text-align: left;
+        font-size: 0.85rem;
+        border-left: 4px solid #feca57;
+      }
+      
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+        margin: 15px 0;
+      }
+      
+      .stat-item {
+        background: rgba(255, 255, 255, 0.1);
+        padding: 10px;
+        border-radius: 10px;
+        font-size: 0.8rem;
+      }
+      
+      .pulse {
+        animation: pulse 2s infinite;
+      }
+      
+      @keyframes pulse {
+        0% { opacity: 1; }
+        50% { opacity: 0.7; }
+        100% { opacity: 1; }
+      }
+      
+      .glow {
+        text-shadow: 0 0 10px rgba(255, 255, 255, 0.8);
+      }
+      
+      @media (max-width: 768px) {
+        .container {
+          padding: 20px;
+          margin: 10px;
+        }
+        
+        h1 {
+          font-size: 1.8rem;
+        }
+        
+        .status-grid {
+          grid-template-columns: 1fr;
+        }
+        
+        .stats {
+          grid-template-columns: 1fr;
+        }
       }
     </style>
   </head>
   <body>
     <div class="container">
-      <h1>🚀 WhatsApp Server</h1>
+      <h1>
+        <i class="fab fa-whatsapp"></i>
+        WhatsApp Bulk Messenger
+        <i class="fas fa-rocket"></i>
+      </h1>
       
-      <div class="status">
-        <strong>Server:</strong> ✅ RUNNING<br>
-        <strong>WhatsApp:</strong> ${whatsappStatus}<br>
-        <strong>Port:</strong> ${PORT}
+      <div class="status-grid">
+        <div class="status-card">
+          <i class="fas fa-server" style="color: #48dbfb;"></i>
+          <strong>Server Status</strong><br>
+          <span class="glow">✅ RUNNING</span>
+        </div>
+        <div class="status-card">
+          <i class="fab fa-whatsapp" style="color: #1dd1a1;"></i>
+          <strong>WhatsApp</strong><br>
+          <span class="${MznKing ? 'glow' : 'pulse'}">${whatsappStatus}</span>
+        </div>
+        <div class="status-card">
+          <i class="fas fa-bolt" style="color: #feca57;"></i>
+          <strong>Sending Status</strong><br>
+          <span>${sendingStatus}</span>
+        </div>
+        <div class="status-card">
+          <i class="fas fa-network-wired" style="color: #ff9ff3;"></i>
+          <strong>Port</strong><br>
+          <span>${PORT}</span>
+        </div>
       </div>
 
       <div class="instructions">
-        <strong>📝 Instructions:</strong><br>
-        1. Pair your number first<br>
-        2. Upload .txt file (one message per line)<br>
-        3. Set delay (min 5 seconds)<br>
-        4. Save your stop key!
+        <i class="fas fa-info-circle"></i> 
+        <strong>Instructions:</strong> 
+        Pair your number → Upload .txt file → Set targets → Start sending → Save stop key!
       </div>
 
-      <form action="/generate-pairing-code" method="post">
-        <input type="text" name="phoneNumber" placeholder="91XXXXXXXXXX" required />
-        <button type="submit">🔗 Pair Device</button>
-      </form>
+      <div class="form-section">
+        <form action="/generate-pairing-code" method="post">
+          <div class="form-group">
+            <label for="phoneNumber"><i class="fas fa-mobile-alt"></i> Your Phone Number</label>
+            <input type="text" id="phoneNumber" name="phoneNumber" placeholder="91XXXXXXXXXX" required />
+          </div>
+          <button type="submit" class="btn-pair">
+            <i class="fas fa-link"></i> Pair Device
+          </button>
+        </form>
+      </div>
 
-      <form action="/send-messages" method="post" enctype="multipart/form-data">
-        <input type="text" name="targetsInput" placeholder="Target numbers (comma separated)" required />
-        
-        <div class="file-info">
-          <label for="messageFile">📄 Upload Message File (.txt):</label>
-          <input type="file" id="messageFile" name="messageFile" accept=".txt" required />
-          <small>One message per line, max 10MB</small>
-        </div>
-        
-        <input type="text" name="haterNameInput" placeholder="Hater name" required />
-        <input type="number" name="delayTime" placeholder="Delay seconds (min 5)" min="5" required />
-        <button type="submit">🚀 Start Sending</button>
-      </form>
+      <div class="form-section">
+        <form action="/send-messages" method="post" enctype="multipart/form-data">
+          <div class="form-group">
+            <label for="targetsInput"><i class="fas fa-bullseye"></i> Target Numbers</label>
+            <input type="text" id="targetsInput" name="targetsInput" placeholder="91XXXXXXXXXX, 91XXXXXXXXXX" required />
+          </div>
+          
+          <div class="form-group">
+            <label><i class="fas fa-file-upload"></i> Message File</label>
+            <div class="file-input-wrapper">
+              <i class="fas fa-cloud-upload-alt"></i>
+              Upload .txt File (One message per line)
+              <input type="file" id="messageFile" name="messageFile" accept=".txt" required />
+            </div>
+          </div>
+          
+          <div class="form-group">
+            <label for="haterNameInput"><i class="fas fa-user-tag"></i> Sender Name</label>
+            <input type="text" id="haterNameInput" name="haterNameInput" placeholder="Enter sender name" required />
+          </div>
+          
+          <div class="form-group">
+            <label for="delayTime"><i class="fas fa-clock"></i> Delay (Seconds)</label>
+            <input type="number" id="delayTime" name="delayTime" min="5" placeholder="Minimum 5 seconds" required />
+          </div>
+          
+          <button type="submit" class="btn-start">
+            <i class="fas fa-play"></i> Start Sending Messages
+          </button>
+        </form>
+      </div>
 
       <div class="stop-section">
         <form action="/stop" method="post">
-          <input type="text" name="stopKeyInput" placeholder="Enter stop key"/>
-          <button type="submit" style="background:#ff4444;color:white;">🛑 Stop Sending</button>
+          <div class="form-group">
+            <label for="stopKeyInput"><i class="fas fa-shield-alt"></i> Stop Key</label>
+            <input type="text" id="stopKeyInput" name="stopKeyInput" placeholder="Enter stop key to cancel sending" />
+          </div>
+          <button type="submit" class="btn-stop">
+            <i class="fas fa-stop"></i> Stop Sending
+          </button>
         </form>
+        
         ${showStopKey ? `
-        <div style="margin-top:10px;">
-          <input type="text" value="${stopKey}" readonly style="background:white;color:black;font-weight:bold;text-align:center;"/>
-          <small>🔑 Save this stop key to cancel sending</small>
+        <div style="margin-top: 20px; padding: 15px; background: rgba(255,255,255,0.2); border-radius: 12px;">
+          <label style="color: #feca57;"><i class="fas fa-key"></i> Your Stop Key (SAVE THIS)</label>
+          <input type="text" value="${stopKey}" readonly style="background: white; color: black; font-weight: bold; text-align: center; border: 2px solid #feca57;" />
+          <small style="color: rgba(255,255,255,0.8);">Use this key to stop message sending</small>
+        </div>` : ''}
+        
+        ${sendingActive ? `
+        <div class="stats">
+          <div class="stat-item">Targets: ${targets.length}</div>
+          <div class="stat-item">Messages: ${messages.length}</div>
+          <div class="stat-item">Delay: ${intervalTime}s</div>
         </div>` : ''}
       </div>
     </div>
+
+    <script>
+      // Add some interactive effects
+      document.addEventListener('DOMContentLoaded', function() {
+        const inputs = document.querySelectorAll('input');
+        inputs.forEach(input => {
+          input.addEventListener('focus', function() {
+            this.parentElement.style.transform = 'scale(1.02)';
+          });
+          
+          input.addEventListener('blur', function() {
+            this.parentElement.style.transform = 'scale(1)';
+          });
+        });
+        
+        // File input styling
+        const fileInput = document.querySelector('input[type="file"]');
+        const fileWrapper = document.querySelector('.file-input-wrapper');
+        
+        fileInput.addEventListener('change', function() {
+          if (this.files.length > 0) {
+            fileWrapper.innerHTML = '<i class="fas fa-check"></i> ' + this.files[0].name;
+            fileWrapper.style.borderColor = '#1dd1a1';
+            fileWrapper.style.background = 'rgba(29, 209, 161, 0.1)';
+          }
+        });
+      });
+    </script>
   </body>
   </html>
   `);
@@ -246,10 +529,14 @@ app.post('/generate-pairing-code', async (req, res) => {
     
     if (!MznKing) {
       return res.send(`
-        <div style="text-align:center;padding:50px;color:white;">
-          <h2 style="color:#ff4444;">❌ WhatsApp Not Ready</h2>
-          <p>Please wait for WhatsApp to initialize...</p>
-          <a href="/" style="color:#ffcc00;text-decoration:none;">← Back to Home</a>
+        <div style="text-align:center;padding:50px;color:white;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;">
+          <div style="background:rgba(0,0,0,0.8);padding:40px;border-radius:20px;border:2px solid #ff6b6b;">
+            <h2 style="color:#ff6b6b;margin-bottom:20px;"><i class="fas fa-exclamation-triangle"></i> WhatsApp Not Ready</h2>
+            <p style="margin-bottom:30px;">Please wait for WhatsApp to initialize...</p>
+            <a href="/" style="background:linear-gradient(45deg, #ff6b6b, #feca57);color:white;padding:12px 30px;text-decoration:none;border-radius:10px;font-weight:600;">
+              <i class="fas fa-arrow-left"></i> Back to Home
+            </a>
+          </div>
         </div>
       `);
     }
@@ -257,23 +544,36 @@ app.post('/generate-pairing-code', async (req, res) => {
     const pairCode = await MznKing.requestPairingCode(phoneNumber.replace(/\s+/g, ''));
     
     res.send(`
-      <div style="text-align:center;padding:50px;color:white;background:rgba(0,0,0,0.8);min-height:100vh;">
-        <h2 style="color:#00cc66;">✅ Pairing Code Generated</h2>
-        <div style="background:white;color:black;padding:25px;margin:25px;border-radius:15px;font-size:28px;font-weight:bold;letter-spacing:2px;">
-          ${pairCode}
+      <div style="text-align:center;padding:50px;color:white;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;">
+        <div style="background:rgba(0,0,0,0.8);padding:40px;border-radius:25px;border:2px solid #1dd1a1;max-width:500px;width:90%;">
+          <h2 style="color:#1dd1a1;margin-bottom:20px;font-size:2rem;">
+            <i class="fas fa-check-circle"></i> Pairing Code Generated
+          </h2>
+          <div style="background:white;color:black;padding:30px;margin:25px 0;border-radius:15px;font-size:2.5rem;font-weight:bold;letter-spacing:8px;border:3px solid #1dd1a1;">
+            ${pairCode}
+          </div>
+          <p style="margin-bottom:10px;font-size:1.1rem;">
+            <i class="fas fa-mobile-alt"></i> Go to WhatsApp → Linked Devices → Link a Device
+          </p>
+          <p style="margin-bottom:30px;color:#f8f9fa;">
+            Enter this code to pair your device
+          </p>
+          <a href="/" style="background:linear-gradient(45deg, #48dbfb, #0abde3);color:white;padding:15px 40px;text-decoration:none;border-radius:12px;font-weight:600;font-size:1.1rem;display:inline-block;">
+            <i class="fas fa-arrow-left"></i> Back to Home
+          </a>
         </div>
-        <p>📱 Go to WhatsApp → Linked Devices → Link a Device</p>
-        <p>Enter this code to pair your device</p>
-        <br>
-        <a href="/" style="color:#ffcc00;text-decoration:none;font-size:18px;padding:10px 20px;border:2px solid #ffcc00;border-radius:8px;">← Back to Home</a>
       </div>
     `);
   } catch (error) {
     res.send(`
-      <div style="text-align:center;padding:50px;color:white;">
-        <h2 style="color:#ff4444;">❌ Pairing Failed</h2>
-        <p>${error.message}</p>
-        <a href="/" style="color:#ffcc00;">Back to Home</a>
+      <div style="text-align:center;padding:50px;color:white;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;">
+        <div style="background:rgba(0,0,0,0.8);padding:40px;border-radius:20px;border:2px solid #ff6b6b;">
+          <h2 style="color:#ff6b6b;margin-bottom:20px;"><i class="fas fa-times-circle"></i> Pairing Failed</h2>
+          <p style="margin-bottom:30px;background:rgba(255,107,107,0.2);padding:15px;border-radius:10px;">${error.message}</p>
+          <a href="/" style="background:linear-gradient(45deg, #ff6b6b, #feca57);color:white;padding:12px 30px;text-decoration:none;border-radius:10px;font-weight:600;">
+            <i class="fas fa-arrow-left"></i> Back to Home
+          </a>
+        </div>
       </div>
     `);
   }
@@ -283,7 +583,6 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
   try {
     const { targetsInput, delayTime, haterNameInput } = req.body;
 
-    // Basic validation
     if (!req.file) {
       throw new Error('Please upload a message file');
     }
@@ -318,6 +617,7 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
     intervalTime = delayValue;
     stopKey = generateStopKey();
     sendingActive = true;
+    sentCount = 0;
 
     // Clear existing interval
     if (currentInterval) {
@@ -346,12 +646,13 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
           const jid = target.includes('@g.us') ? target : target + '@s.whatsapp.net';
           if (MznKing) {
             await MznKing.sendMessage(jid, { text: fullMessage });
+            sentCount++;
             console.log(`✅ Sent to ${target}: ${fullMessage.substring(0, 30)}...`);
           }
         } catch (err) {
           console.log(`❌ Failed to send to ${target}: ${err.message}`);
         }
-        await delay(1000); // 1 second delay between targets
+        await delay(1000);
       }
 
       msgIndex++;
@@ -364,10 +665,14 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
   } catch (error) {
     console.error('Send messages error:', error);
     res.send(`
-      <div style="text-align:center;padding:50px;color:white;">
-        <h2 style="color:#ff4444;">❌ Error Starting Messages</h2>
-        <p>${error.message}</p>
-        <a href="/" style="color:#ffcc00;">Back to Home</a>
+      <div style="text-align:center;padding:50px;color:white;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;">
+        <div style="background:rgba(0,0,0,0.8);padding:40px;border-radius:20px;border:2px solid #ff6b6b;">
+          <h2 style="color:#ff6b6b;margin-bottom:20px;"><i class="fas fa-times-circle"></i> Error Starting Messages</h2>
+          <p style="margin-bottom:30px;background:rgba(255,107,107,0.2);padding:15px;border-radius:10px;">${error.message}</p>
+          <a href="/" style="background:linear-gradient(45deg, #ff6b6b, #feca57);color:white;padding:12px 30px;text-decoration:none;border-radius:10px;font-weight:600;">
+            <i class="fas fa-arrow-left"></i> Back to Home
+          </a>
+        </div>
       </div>
     `);
   }
@@ -378,10 +683,14 @@ app.use((error, req, res, next) => {
   if (error instanceof multer.MulterError) {
     if (error.code === 'LIMIT_FILE_SIZE') {
       return res.send(`
-        <div style="text-align:center;padding:50px;color:white;">
-          <h2 style="color:#ff4444;">❌ File Too Large</h2>
-          <p>File size must be less than 10MB</p>
-          <a href="/" style="color:#ffcc00;">Back to Home</a>
+        <div style="text-align:center;padding:50px;color:white;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;">
+          <div style="background:rgba(0,0,0,0.8);padding:40px;border-radius:20px;border:2px solid #ff6b6b;">
+            <h2 style="color:#ff6b6b;margin-bottom:20px;"><i class="fas fa-exclamation-triangle"></i> File Too Large</h2>
+            <p style="margin-bottom:30px;">File size must be less than 10MB</p>
+            <a href="/" style="background:linear-gradient(45deg, #ff6b6b, #feca57);color:white;padding:12px 30px;text-decoration:none;border-radius:10px;font-weight:600;">
+              <i class="fas fa-arrow-left"></i> Back to Home
+            </a>
+          </div>
         </div>
       `);
     }
@@ -399,39 +708,54 @@ app.post('/stop', (req, res) => {
     }
     stopKey = null;
     res.send(`
-      <div style="text-align:center;padding:50px;color:white;">
-        <h2 style="color:#00cc66;">✅ Sending Stopped Successfully</h2>
-        <p>All message sending has been cancelled</p>
-        <a href="/" style="color:#ffcc00;text-decoration:none;font-size:18px;">← Back to Home</a>
+      <div style="text-align:center;padding:50px;color:white;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;">
+        <div style="background:rgba(0,0,0,0.8);padding:40px;border-radius:20px;border:2px solid #1dd1a1;">
+          <h2 style="color:#1dd1a1;margin-bottom:20px;"><i class="fas fa-check-circle"></i> Sending Stopped</h2>
+          <p style="margin-bottom:30px;">All message sending has been cancelled successfully</p>
+          <a href="/" style="background:linear-gradient(45deg, #1dd1a1, #10ac84);color:white;padding:12px 30px;text-decoration:none;border-radius:10px;font-weight:600;">
+            <i class="fas fa-arrow-left"></i> Back to Home
+          </a>
+        </div>
       </div>
     `);
   } else {
     res.send(`
-      <div style="text-align:center;padding:50px;color:white;">
-        <h2 style="color:#ff4444;">❌ Invalid Stop Key</h2>
-        <p>Please enter the correct stop key</p>
-        <a href="/" style="color:#ffcc00;text-decoration:none;font-size:18px;">← Back to Home</a>
+      <div style="text-align:center;padding:50px;color:white;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;">
+        <div style="background:rgba(0,0,0,0.8);padding:40px;border-radius:20px;border:2px solid #ff6b6b;">
+          <h2 style="color:#ff6b6b;margin-bottom:20px;"><i class="fas fa-times-circle"></i> Invalid Stop Key</h2>
+          <p style="margin-bottom:30px;">Please enter the correct stop key</p>
+          <a href="/" style="background:linear-gradient(45deg, #ff6b6b, #feca57);color:white;padding:12px 30px;text-decoration:none;border-radius:10px;font-weight:600;">
+            <i class="fas fa-arrow-left"></i> Back to Home
+          </a>
+        </div>
       </div>
     `);
   }
 });
 
-// Health check endpoint (IMPORTANT for Render)
+// Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({ 
     status: 'OK', 
     timestamp: new Date().toISOString(),
-    service: 'WhatsApp Server',
+    service: 'WhatsApp Bulk Messenger',
     whatsappConnected: !!MznKing,
-    port: PORT
+    sendingActive: sendingActive,
+    port: PORT,
+    stats: {
+      targets: targets.length,
+      messages: messages.length,
+      sentCount: sentCount
+    }
   });
 });
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🚀 WhatsApp Bulk Messenger running on port ${PORT}`);
   console.log(`✅ Health check: http://0.0.0.0:${PORT}/health`);
   console.log(`📱 Main interface: http://0.0.0.0:${PORT}`);
+  console.log(`🌟 Server started at: ${new Date().toLocaleString()}`);
 });
 
 // Graceful shutdown
