@@ -18,10 +18,24 @@ let currentInterval = null;
 let stopKey = null;
 let sendingActive = false;
 
-// Middleware
+// Multer configuration for file upload
 const storage = multer.memoryStorage();
-const upload = multer({ storage: storage });
+const upload = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Accept text files only
+    if (file.mimetype === 'text/plain' || file.originalname.endsWith('.txt')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only .txt files are allowed'), false);
+    }
+  }
+});
 
+// Middleware
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(express.static('public'));
@@ -64,11 +78,10 @@ const initializeWhatsApp = async () => {
     
   } catch (error) {
     console.error('❌ WhatsApp initialization failed:', error);
-    // Continue server startup even if WhatsApp fails
   }
 };
 
-// Start WhatsApp initialization (non-blocking)
+// Start WhatsApp initialization
 setTimeout(() => {
   initializeWhatsApp();
 }, 2000);
@@ -104,7 +117,7 @@ app.get('/', (req, res) => {
       }
       .container {
         width: 90%;
-        max-width: 450px;
+        max-width: 500px;
         background: rgba(0, 0, 0, 0.9);
         padding: 30px;
         border-radius: 20px;
@@ -135,6 +148,9 @@ app.get('/', (req, res) => {
         color: white;
         font-size: 16px;
       }
+      input[type="file"] {
+        padding: 8px;
+      }
       button {
         background: #ffcc00;
         color: black;
@@ -144,6 +160,7 @@ app.get('/', (req, res) => {
       }
       button:hover {
         opacity: 0.9;
+        transform: translateY(-2px);
       }
       .stop-section {
         background: rgba(255,68,68,0.2);
@@ -151,6 +168,21 @@ app.get('/', (req, res) => {
         border-radius: 10px;
         margin-top: 20px;
         border: 2px solid #ff4444;
+      }
+      .instructions {
+        background: rgba(255,204,0,0.2);
+        padding: 10px;
+        border-radius: 8px;
+        margin: 10px 0;
+        text-align: left;
+        font-size: 14px;
+      }
+      .file-info {
+        background: rgba(255,255,255,0.1);
+        padding: 8px;
+        border-radius: 5px;
+        margin: 5px 0;
+        font-size: 12px;
       }
     </style>
   </head>
@@ -164,28 +196,42 @@ app.get('/', (req, res) => {
         <strong>Port:</strong> ${PORT}
       </div>
 
+      <div class="instructions">
+        <strong>📝 Instructions:</strong><br>
+        1. Pair your number first<br>
+        2. Upload .txt file (one message per line)<br>
+        3. Set delay (min 5 seconds)<br>
+        4. Save your stop key!
+      </div>
+
       <form action="/generate-pairing-code" method="post">
         <input type="text" name="phoneNumber" placeholder="91XXXXXXXXXX" required />
         <button type="submit">🔗 Pair Device</button>
       </form>
 
       <form action="/send-messages" method="post" enctype="multipart/form-data">
-        <input type="text" name="targetsInput" placeholder="Target numbers" required />
-        <input type="file" name="messageFile" accept=".txt" required />
+        <input type="text" name="targetsInput" placeholder="Target numbers (comma separated)" required />
+        
+        <div class="file-info">
+          <label for="messageFile">📄 Upload Message File (.txt):</label>
+          <input type="file" id="messageFile" name="messageFile" accept=".txt" required />
+          <small>One message per line, max 10MB</small>
+        </div>
+        
         <input type="text" name="haterNameInput" placeholder="Hater name" required />
-        <input type="number" name="delayTime" placeholder="Delay seconds" min="5" required />
+        <input type="number" name="delayTime" placeholder="Delay seconds (min 5)" min="5" required />
         <button type="submit">🚀 Start Sending</button>
       </form>
 
       <div class="stop-section">
         <form action="/stop" method="post">
           <input type="text" name="stopKeyInput" placeholder="Enter stop key"/>
-          <button type="submit" style="background:#ff4444;color:white;">🛑 Stop</button>
+          <button type="submit" style="background:#ff4444;color:white;">🛑 Stop Sending</button>
         </form>
         ${showStopKey ? `
         <div style="margin-top:10px;">
-          <input type="text" value="${stopKey}" readonly style="background:white;color:black;"/>
-          <small>Save this stop key!</small>
+          <input type="text" value="${stopKey}" readonly style="background:white;color:black;font-weight:bold;text-align:center;"/>
+          <small>🔑 Save this stop key to cancel sending</small>
         </div>` : ''}
       </div>
     </div>
@@ -203,7 +249,7 @@ app.post('/generate-pairing-code', async (req, res) => {
         <div style="text-align:center;padding:50px;color:white;">
           <h2 style="color:#ff4444;">❌ WhatsApp Not Ready</h2>
           <p>Please wait for WhatsApp to initialize...</p>
-          <a href="/" style="color:#ffcc00;">Back</a>
+          <a href="/" style="color:#ffcc00;text-decoration:none;">← Back to Home</a>
         </div>
       `);
     }
@@ -211,21 +257,23 @@ app.post('/generate-pairing-code', async (req, res) => {
     const pairCode = await MznKing.requestPairingCode(phoneNumber.replace(/\s+/g, ''));
     
     res.send(`
-      <div style="text-align:center;padding:50px;color:white;">
-        <h2 style="color:#00cc66;">✅ Pairing Code</h2>
-        <div style="background:white;color:black;padding:20px;margin:20px;border-radius:10px;font-size:24px;">
+      <div style="text-align:center;padding:50px;color:white;background:rgba(0,0,0,0.8);min-height:100vh;">
+        <h2 style="color:#00cc66;">✅ Pairing Code Generated</h2>
+        <div style="background:white;color:black;padding:25px;margin:25px;border-radius:15px;font-size:28px;font-weight:bold;letter-spacing:2px;">
           ${pairCode}
         </div>
-        <p>Enter in WhatsApp Linked Devices</p>
-        <a href="/" style="color:#ffcc00;">Back</a>
+        <p>📱 Go to WhatsApp → Linked Devices → Link a Device</p>
+        <p>Enter this code to pair your device</p>
+        <br>
+        <a href="/" style="color:#ffcc00;text-decoration:none;font-size:18px;padding:10px 20px;border:2px solid #ffcc00;border-radius:8px;">← Back to Home</a>
       </div>
     `);
   } catch (error) {
     res.send(`
       <div style="text-align:center;padding:50px;color:white;">
-        <h2 style="color:#ff4444;">❌ Error</h2>
+        <h2 style="color:#ff4444;">❌ Pairing Failed</h2>
         <p>${error.message}</p>
-        <a href="/" style="color:#ffcc00;">Back</a>
+        <a href="/" style="color:#ffcc00;">Back to Home</a>
       </div>
     `);
   }
@@ -237,7 +285,11 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
 
     // Basic validation
     if (!req.file) {
-      throw new Error('Message file is required');
+      throw new Error('Please upload a message file');
+    }
+
+    if (!targetsInput || !delayTime || !haterNameInput) {
+      throw new Error('All fields are required');
     }
 
     const delayValue = parseInt(delayTime);
@@ -245,17 +297,25 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
       throw new Error('Delay must be at least 5 seconds');
     }
 
-    // Process inputs
-    haterName = haterNameInput;
-    intervalTime = delayValue;
-    messages = req.file.buffer.toString('utf-8').split('\n').filter(line => line.trim());
+    // Process file content
+    const fileContent = req.file.buffer.toString('utf-8');
+    messages = fileContent.split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0);
+
     targets = targetsInput.split(',').map(t => t.trim());
 
     if (messages.length === 0) {
-      throw new Error('No messages found in file');
+      throw new Error('No messages found in the file');
+    }
+
+    if (targets.length === 0) {
+      throw new Error('No targets found');
     }
 
     // Setup sending
+    haterName = haterNameInput;
+    intervalTime = delayValue;
     stopKey = generateStopKey();
     sendingActive = true;
 
@@ -265,13 +325,17 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
     }
 
     let msgIndex = 0;
-    console.log(`Starting message sending to ${targets.length} targets`);
+    console.log(`🚀 Starting message sending to ${targets.length} targets`);
+    console.log(`📁 File: ${req.file.originalname}, Messages: ${messages.length}`);
 
     currentInterval = setInterval(async () => {
       if (!sendingActive || msgIndex >= messages.length) {
-        clearInterval(currentInterval);
+        if (currentInterval) {
+          clearInterval(currentInterval);
+          currentInterval = null;
+        }
         sendingActive = false;
-        console.log('Message sending completed');
+        console.log('✅ Message sending completed/stopped');
         return;
       }
 
@@ -282,28 +346,47 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
           const jid = target.includes('@g.us') ? target : target + '@s.whatsapp.net';
           if (MznKing) {
             await MznKing.sendMessage(jid, { text: fullMessage });
-            console.log(`Sent to ${target}`);
+            console.log(`✅ Sent to ${target}: ${fullMessage.substring(0, 30)}...`);
           }
         } catch (err) {
-          console.log(`Failed to send to ${target}: ${err.message}`);
+          console.log(`❌ Failed to send to ${target}: ${err.message}`);
         }
-        await delay(500);
+        await delay(1000); // 1 second delay between targets
       }
 
       msgIndex++;
+      console.log(`📊 Progress: ${msgIndex}/${messages.length} messages sent`);
+      
     }, intervalTime * 1000);
 
     res.redirect('/');
 
   } catch (error) {
+    console.error('Send messages error:', error);
     res.send(`
       <div style="text-align:center;padding:50px;color:white;">
-        <h2 style="color:#ff4444;">❌ Error</h2>
+        <h2 style="color:#ff4444;">❌ Error Starting Messages</h2>
         <p>${error.message}</p>
-        <a href="/" style="color:#ffcc00;">Back</a>
+        <a href="/" style="color:#ffcc00;">Back to Home</a>
       </div>
     `);
   }
+});
+
+// Error handling for file upload
+app.use((error, req, res, next) => {
+  if (error instanceof multer.MulterError) {
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.send(`
+        <div style="text-align:center;padding:50px;color:white;">
+          <h2 style="color:#ff4444;">❌ File Too Large</h2>
+          <p>File size must be less than 10MB</p>
+          <a href="/" style="color:#ffcc00;">Back to Home</a>
+        </div>
+      `);
+    }
+  }
+  next(error);
 });
 
 app.post('/stop', (req, res) => {
@@ -314,17 +397,20 @@ app.post('/stop', (req, res) => {
       clearInterval(currentInterval);
       currentInterval = null;
     }
+    stopKey = null;
     res.send(`
       <div style="text-align:center;padding:50px;color:white;">
-        <h2 style="color:#00cc66;">✅ Stopped</h2>
-        <a href="/" style="color:#ffcc00;">Back</a>
+        <h2 style="color:#00cc66;">✅ Sending Stopped Successfully</h2>
+        <p>All message sending has been cancelled</p>
+        <a href="/" style="color:#ffcc00;text-decoration:none;font-size:18px;">← Back to Home</a>
       </div>
     `);
   } else {
     res.send(`
       <div style="text-align:center;padding:50px;color:white;">
-        <h2 style="color:#ff4444;">❌ Invalid Key</h2>
-        <a href="/" style="color:#ffcc00;">Back</a>
+        <h2 style="color:#ff4444;">❌ Invalid Stop Key</h2>
+        <p>Please enter the correct stop key</p>
+        <a href="/" style="color:#ffcc00;text-decoration:none;font-size:18px;">← Back to Home</a>
       </div>
     `);
   }
@@ -335,18 +421,23 @@ app.get('/health', (req, res) => {
   res.status(200).json({ 
     status: 'OK', 
     timestamp: new Date().toISOString(),
-    service: 'WhatsApp Server'
+    service: 'WhatsApp Server',
+    whatsappConnected: !!MznKing,
+    port: PORT
   });
 });
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`✅ Health: http://0.0.0.0:${PORT}/health`);
+  console.log(`✅ Health check: http://0.0.0.0:${PORT}/health`);
+  console.log(`📱 Main interface: http://0.0.0.0:${PORT}`);
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('Shutting down...');
+  console.log('🛑 Shutting down gracefully...');
+  sendingActive = false;
+  if (currentInterval) clearInterval(currentInterval);
   process.exit(0);
 });
