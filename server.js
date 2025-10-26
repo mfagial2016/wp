@@ -2,8 +2,9 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
-const { makeWASocket, useMultiFileAuthState, delay, DisconnectReason } = require("@whiskeysockets/baileys");
+const { makeWASocket, useMultiFileAuthState, delay, DisconnectReason, getAggregateVotesInPollMessage, proto } = require("@whiskeysockets/baileys");
 const multer = require('multer');
+const QRCode = require('qrcode');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -18,6 +19,8 @@ let currentInterval = null;
 let stopKey = null;
 let sendingActive = false;
 let sentCount = 0;
+let qrCodeData = null;
+let connectionStatus = 'disconnected';
 
 // Multer configuration for file upload
 const storage = multer.memoryStorage();
@@ -40,71 +43,202 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(express.static('public'));
 
-// Initialize WhatsApp with error handling
+// Ensure auth_info directory exists
+const ensureAuthDir = () => {
+  const authDir = './auth_info';
+  if (!fs.existsSync(authDir)) {
+    fs.mkdirSync(authDir, { recursive: true });
+  }
+};
+
+// Initialize WhatsApp with proper error handling
 const initializeWhatsApp = async () => {
   try {
     console.log('🔄 Initializing WhatsApp connection...');
+    ensureAuthDir();
     
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
     
     MznKing = makeWASocket({
-      logger: pino({ level: 'silent' }),
+      logger: pino({ level: 'error' }),
       printQRInTerminal: true,
       auth: state,
+      version: [2, 2413, 1],
+      browser: ['Chrome', 'Windows', '10.0.0'],
       markOnlineOnConnect: true,
       syncFullHistory: false,
-      generateHighQualityLinkPreview: true
+      generateHighQualityLinkPreview: true,
+      retryRequestDelayMs: 1000,
+      fireInitQueries: true,
+      connectTimeoutMs: 60000,
+      keepAliveIntervalMs: 10000
     });
 
-    MznKing.ev.on('connection.update', (update) => {
-      const { connection, lastDisconnect, qr } = update;
+    MznKing.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr, isNewLogin, receivedPendingNotifications } = update;
       
+      console.log('📡 Connection Update:', {
+        connection,
+        qr: qr ? 'QR Received' : 'No QR',
+        isNewLogin,
+        receivedPendingNotifications
+      });
+
       if (qr) {
-        console.log('📱 QR Code generated - Scan with WhatsApp');
+        console.log('📱 QR Code generated');
+        qrCodeData = qr;
+        connectionStatus = 'qr_waiting';
+        
+        // Generate QR code image
+        try {
+          const qrImageUrl = await QRCode.toDataURL(qr);
+          qrCodeData = qrImageUrl;
+        } catch (qrError) {
+          console.log('QR Code generation failed:', qrError);
+        }
+      }
+      
+      if (connection === 'connecting') {
+        console.log('🔄 Connecting to WhatsApp...');
+        connectionStatus = 'connecting';
       }
       
       if (connection === 'open') {
         console.log('✅ WhatsApp connected successfully!');
+        connectionStatus = 'connected';
+        qrCodeData = null;
+        
+        // Get connection info
+        try {
+          const user = MznKing.user;
+          console.log('👤 User Info:', {
+            id: user?.id,
+            name: user?.name,
+            phone: user?.phone
+          });
+        } catch (userError) {
+          console.log('User info error:', userError);
+        }
       }
       
       if (connection === 'close') {
         console.log('❌ WhatsApp disconnected');
-        const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const error = lastDisconnect?.error;
+        
+        console.log('Disconnect Details:', {
+          statusCode,
+          error: error?.message
+        });
+
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        
         if (shouldReconnect) {
           console.log('🔄 Attempting to reconnect...');
+          connectionStatus = 'reconnecting';
           setTimeout(() => initializeWhatsApp(), 5000);
+        } else {
+          console.log('🚫 Logged out, manual reconnection required');
+          connectionStatus = 'logged_out';
+          
+          // Clear auth info if logged out
+          try {
+            const authDir = './auth_info';
+            if (fs.existsSync(authDir)) {
+              fs.rmSync(authDir, { recursive: true, force: true });
+              console.log('🗑️ Cleared auth data due to logout');
+            }
+          } catch (cleanError) {
+            console.log('Auth cleanup error:', cleanError);
+          }
         }
       }
     });
 
     MznKing.ev.on('creds.update', saveCreds);
-    MznKing.ev.on('messages.upsert', () => {});
+    
+    // Handle other events
+    MznKing.ev.on('messages.upsert', (m) => {
+      console.log('📨 New message received');
+    });
+    
+    MznKing.ev.on('messaging-history.set', (m) => {
+      console.log('📚 Messaging history set');
+    });
     
   } catch (error) {
     console.error('❌ WhatsApp initialization failed:', error);
+    connectionStatus = 'error';
+    
+    // Retry after 10 seconds
+    setTimeout(() => {
+      console.log('🔄 Retrying WhatsApp initialization...');
+      initializeWhatsApp();
+    }, 10000);
   }
 };
 
 // Start WhatsApp initialization
 setTimeout(() => {
   initializeWhatsApp();
-}, 2000);
+}, 1000);
 
 // Utility functions
 function generateStopKey() {
   return 'STOP-' + Math.floor(100000 + Math.random() * 900000);
 }
 
-function formatTime(seconds) {
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = seconds % 60;
-  return `${minutes}m ${remainingSeconds}s`;
+function formatPhoneNumber(phone) {
+  // Remove all non-digit characters
+  let cleaned = phone.replace(/\D/g, '');
+  
+  // If starts with 0, remove it
+  if (cleaned.startsWith('0')) {
+    cleaned = cleaned.substring(1);
+  }
+  
+  // If doesn't start with country code, add 91 (India)
+  if (!cleaned.startsWith('91') && !cleaned.startsWith('1') && !cleaned.startsWith('44')) {
+    cleaned = '91' + cleaned;
+  }
+  
+  return cleaned;
 }
 
 // Routes
 app.get('/', (req, res) => {
   const showStopKey = sendingActive && stopKey;
-  const whatsappStatus = MznKing ? '✅ Connected' : '🔄 Connecting...';
+  
+  // Determine WhatsApp status with better logic
+  let whatsappStatus = '🔴 Disconnected';
+  let statusColor = '#ff6b6b';
+  
+  switch(connectionStatus) {
+    case 'connected':
+      whatsappStatus = '🟢 Connected';
+      statusColor = '#1dd1a1';
+      break;
+    case 'connecting':
+      whatsappStatus = '🟡 Connecting...';
+      statusColor = '#feca57';
+      break;
+    case 'qr_waiting':
+      whatsappStatus = '🟠 Scan QR Code';
+      statusColor = '#ff9ff3';
+      break;
+    case 'reconnecting':
+      whatsappStatus = '🟠 Reconnecting...';
+      statusColor = '#feca57';
+      break;
+    case 'logged_out':
+      whatsappStatus = '🔴 Logged Out';
+      statusColor = '#ff6b6b';
+      break;
+    default:
+      whatsappStatus = '🔴 Disconnected';
+      statusColor = '#ff6b6b';
+  }
+
   const sendingStatus = sendingActive ? '🟢 Active' : '🔴 Inactive';
 
   res.send(`
@@ -197,10 +331,26 @@ app.get('/', (req, res) => {
         transform: translateY(-5px);
       }
       
-      .status-card i {
-        font-size: 1.5rem;
-        margin-bottom: 8px;
-        display: block;
+      .qr-section {
+        background: rgba(255, 255, 255, 0.2);
+        padding: 20px;
+        border-radius: 15px;
+        margin: 20px 0;
+        border: 2px dashed rgba(255, 255, 255, 0.3);
+      }
+      
+      .qr-code {
+        max-width: 250px;
+        margin: 0 auto;
+        padding: 15px;
+        background: white;
+        border-radius: 10px;
+      }
+      
+      .qr-code img {
+        width: 100%;
+        height: auto;
+        border-radius: 5px;
       }
       
       .form-section {
@@ -247,28 +397,6 @@ app.get('/', (req, res) => {
         box-shadow: 0 0 20px rgba(72, 219, 251, 0.3);
       }
       
-      .file-input-wrapper {
-        position: relative;
-        cursor: pointer;
-        text-align: center;
-        border: 2px dashed rgba(255, 255, 255, 0.3);
-      }
-      
-      .file-input-wrapper:hover {
-        border-color: #48dbfb;
-        background: rgba(72, 219, 251, 0.1);
-      }
-      
-      .file-input-wrapper input[type="file"] {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        opacity: 0;
-        cursor: pointer;
-      }
-      
       button {
         background: linear-gradient(45deg, #ff6b6b, #feca57);
         color: white;
@@ -280,28 +408,9 @@ app.get('/', (req, res) => {
         transition: all 0.3s ease;
       }
       
-      button::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: -100%;
-        width: 100%;
-        height: 100%;
-        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
-        transition: left 0.5s;
-      }
-      
-      button:hover::before {
-        left: 100%;
-      }
-      
       button:hover {
         transform: translateY(-3px);
         box-shadow: 0 10px 25px rgba(255, 107, 107, 0.4);
-      }
-      
-      button:active {
-        transform: translateY(-1px);
       }
       
       .btn-pair {
@@ -316,16 +425,7 @@ app.get('/', (req, res) => {
         background: linear-gradient(45deg, #ff6b6b, #ee5a52);
       }
       
-      .stop-section {
-        background: rgba(255, 107, 107, 0.2);
-        padding: 20px;
-        border-radius: 20px;
-        margin-top: 25px;
-        border: 1px solid rgba(255, 107, 107, 0.3);
-        backdrop-filter: blur(10px);
-      }
-      
-      .instructions {
+      .connection-tips {
         background: rgba(255, 255, 255, 0.15);
         padding: 15px;
         border-radius: 15px;
@@ -333,34 +433,6 @@ app.get('/', (req, res) => {
         text-align: left;
         font-size: 0.85rem;
         border-left: 4px solid #feca57;
-      }
-      
-      .stats {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 10px;
-        margin: 15px 0;
-      }
-      
-      .stat-item {
-        background: rgba(255, 255, 255, 0.1);
-        padding: 10px;
-        border-radius: 10px;
-        font-size: 0.8rem;
-      }
-      
-      .pulse {
-        animation: pulse 2s infinite;
-      }
-      
-      @keyframes pulse {
-        0% { opacity: 1; }
-        50% { opacity: 0.7; }
-        100% { opacity: 1; }
-      }
-      
-      .glow {
-        text-shadow: 0 0 10px rgba(255, 255, 255, 0.8);
       }
       
       @media (max-width: 768px) {
@@ -374,10 +446,6 @@ app.get('/', (req, res) => {
         }
         
         .status-grid {
-          grid-template-columns: 1fr;
-        }
-        
-        .stats {
           grid-template-columns: 1fr;
         }
       }
@@ -395,12 +463,12 @@ app.get('/', (req, res) => {
         <div class="status-card">
           <i class="fas fa-server" style="color: #48dbfb;"></i>
           <strong>Server Status</strong><br>
-          <span class="glow">✅ RUNNING</span>
+          <span style="color: #1dd1a1;">✅ RUNNING</span>
         </div>
         <div class="status-card">
-          <i class="fab fa-whatsapp" style="color: #1dd1a1;"></i>
+          <i class="fab fa-whatsapp" style="color: ${statusColor};"></i>
           <strong>WhatsApp</strong><br>
-          <span class="${MznKing ? 'glow' : 'pulse'}">${whatsappStatus}</span>
+          <span style="color: ${statusColor};">${whatsappStatus}</span>
         </div>
         <div class="status-card">
           <i class="fas fa-bolt" style="color: #feca57;"></i>
@@ -414,20 +482,36 @@ app.get('/', (req, res) => {
         </div>
       </div>
 
-      <div class="instructions">
-        <i class="fas fa-info-circle"></i> 
-        <strong>Instructions:</strong> 
-        Pair your number → Upload .txt file → Set targets → Start sending → Save stop key!
+      ${connectionStatus === 'qr_waiting' && qrCodeData ? `
+      <div class="qr-section">
+        <h3 style="margin-bottom: 15px; color: #feca57;">
+          <i class="fas fa-qrcode"></i> Scan QR Code
+        </h3>
+        <div class="qr-code">
+          <img src="${qrCodeData}" alt="WhatsApp QR Code" />
+        </div>
+        <p style="margin-top: 15px; font-size: 0.9rem;">
+          Open WhatsApp → Settings → Linked Devices → Scan QR Code
+        </p>
+      </div>
+      ` : ''}
+
+      <div class="connection-tips">
+        <strong><i class="fas fa-lightbulb"></i> Connection Tips:</strong><br>
+        • Use international format: 91XXXXXXXXXX<br>
+        • Ensure stable internet connection<br>
+        • Keep phone with WhatsApp online<br>
+        • QR code expires in 20 seconds
       </div>
 
       <div class="form-section">
         <form action="/generate-pairing-code" method="post">
           <div class="form-group">
-            <label for="phoneNumber"><i class="fas fa-mobile-alt"></i> Your Phone Number</label>
-            <input type="text" id="phoneNumber" name="phoneNumber" placeholder="91XXXXXXXXXX" required />
+            <label for="phoneNumber"><i class="fas fa-mobile-alt"></i> Phone Number (International Format)</label>
+            <input type="text" id="phoneNumber" name="phoneNumber" placeholder="91XXXXXXXXXX (without +)" required />
           </div>
           <button type="submit" class="btn-pair">
-            <i class="fas fa-link"></i> Pair Device
+            <i class="fas fa-link"></i> Get Pairing Code
           </button>
         </form>
       </div>
@@ -458,64 +542,47 @@ app.get('/', (req, res) => {
             <input type="number" id="delayTime" name="delayTime" min="5" placeholder="Minimum 5 seconds" required />
           </div>
           
-          <button type="submit" class="btn-start">
+          <button type="submit" class="btn-start" ${connectionStatus !== 'connected' ? 'disabled style="opacity:0.6;"' : ''}>
             <i class="fas fa-play"></i> Start Sending Messages
           </button>
+          ${connectionStatus !== 'connected' ? '<p style="color: #ff6b6b; margin-top: 10px;"><i class="fas fa-exclamation-triangle"></i> Connect WhatsApp first</p>' : ''}
         </form>
       </div>
 
-      <div class="stop-section">
-        <form action="/stop" method="post">
-          <div class="form-group">
-            <label for="stopKeyInput"><i class="fas fa-shield-alt"></i> Stop Key</label>
-            <input type="text" id="stopKeyInput" name="stopKeyInput" placeholder="Enter stop key to cancel sending" />
-          </div>
-          <button type="submit" class="btn-stop">
-            <i class="fas fa-stop"></i> Stop Sending
-          </button>
-        </form>
-        
-        ${showStopKey ? `
-        <div style="margin-top: 20px; padding: 15px; background: rgba(255,255,255,0.2); border-radius: 12px;">
+      ${showStopKey ? `
+      <div class="form-section" style="background: rgba(255,107,107,0.2); border-color: #ff6b6b;">
+        <div class="form-group">
           <label style="color: #feca57;"><i class="fas fa-key"></i> Your Stop Key (SAVE THIS)</label>
           <input type="text" value="${stopKey}" readonly style="background: white; color: black; font-weight: bold; text-align: center; border: 2px solid #feca57;" />
           <small style="color: rgba(255,255,255,0.8);">Use this key to stop message sending</small>
-        </div>` : ''}
-        
-        ${sendingActive ? `
-        <div class="stats">
-          <div class="stat-item">Targets: ${targets.length}</div>
-          <div class="stat-item">Messages: ${messages.length}</div>
-          <div class="stat-item">Delay: ${intervalTime}s</div>
-        </div>` : ''}
+        </div>
       </div>
+      ` : ''}
     </div>
 
     <script>
-      // Add some interactive effects
-      document.addEventListener('DOMContentLoaded', function() {
-        const inputs = document.querySelectorAll('input');
-        inputs.forEach(input => {
-          input.addEventListener('focus', function() {
-            this.parentElement.style.transform = 'scale(1.02)';
-          });
-          
-          input.addEventListener('blur', function() {
-            this.parentElement.style.transform = 'scale(1)';
-          });
-        });
-        
-        // File input styling
-        const fileInput = document.querySelector('input[type="file"]');
-        const fileWrapper = document.querySelector('.file-input-wrapper');
-        
-        fileInput.addEventListener('change', function() {
-          if (this.files.length > 0) {
-            fileWrapper.innerHTML = '<i class="fas fa-check"></i> ' + this.files[0].name;
-            fileWrapper.style.borderColor = '#1dd1a1';
-            fileWrapper.style.background = 'rgba(29, 209, 161, 0.1)';
-          }
-        });
+      // Auto-refresh QR code every 15 seconds if waiting
+      if ('${connectionStatus}' === 'qr_waiting') {
+        setTimeout(() => {
+          window.location.reload();
+        }, 15000);
+      }
+      
+      // Format phone number input
+      document.getElementById('phoneNumber')?.addEventListener('input', function(e) {
+        this.value = this.value.replace(/\D/g, '');
+      });
+      
+      // File input styling
+      const fileInput = document.querySelector('input[type="file"]');
+      const fileWrapper = document.querySelector('.file-input-wrapper');
+      
+      fileInput?.addEventListener('change', function() {
+        if (this.files.length > 0) {
+          fileWrapper.innerHTML = '<i class="fas fa-check"></i> ' + this.files[0].name;
+          fileWrapper.style.borderColor = '#1dd1a1';
+          fileWrapper.style.background = 'rgba(29, 209, 161, 0.1)';
+        }
       });
     </script>
   </body>
@@ -527,36 +594,55 @@ app.post('/generate-pairing-code', async (req, res) => {
   try {
     const phoneNumber = req.body.phoneNumber;
     
-    if (!MznKing) {
-      return res.send(`
-        <div style="text-align:center;padding:50px;color:white;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;">
-          <div style="background:rgba(0,0,0,0.8);padding:40px;border-radius:20px;border:2px solid #ff6b6b;">
-            <h2 style="color:#ff6b6b;margin-bottom:20px;"><i class="fas fa-exclamation-triangle"></i> WhatsApp Not Ready</h2>
-            <p style="margin-bottom:30px;">Please wait for WhatsApp to initialize...</p>
-            <a href="/" style="background:linear-gradient(45deg, #ff6b6b, #feca57);color:white;padding:12px 30px;text-decoration:none;border-radius:10px;font-weight:600;">
-              <i class="fas fa-arrow-left"></i> Back to Home
-            </a>
-          </div>
-        </div>
-      `);
+    if (!phoneNumber) {
+      throw new Error('Phone number is required');
     }
 
-    const pairCode = await MznKing.requestPairingCode(phoneNumber.replace(/\s+/g, ''));
+    // Format phone number
+    const formattedNumber = formatPhoneNumber(phoneNumber);
+    console.log('📞 Requesting pairing code for:', formattedNumber);
+
+    if (!MznKing) {
+      throw new Error('WhatsApp client not initialized. Please wait...');
+    }
+
+    // Check connection state
+    if (connectionStatus !== 'connected' && connectionStatus !== 'open') {
+      throw new Error('WhatsApp is not connected. Please wait for connection or scan QR code.');
+    }
+
+    // Request pairing code with timeout
+    const pairingCodePromise = MznKing.requestPairingCode(formattedNumber);
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Pairing code request timeout')), 30000);
+    });
+
+    const pairCode = await Promise.race([pairingCodePromise, timeoutPromise]);
     
+    console.log('✅ Pairing code generated:', pairCode);
+
     res.send(`
       <div style="text-align:center;padding:50px;color:white;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;">
         <div style="background:rgba(0,0,0,0.8);padding:40px;border-radius:25px;border:2px solid #1dd1a1;max-width:500px;width:90%;">
           <h2 style="color:#1dd1a1;margin-bottom:20px;font-size:2rem;">
             <i class="fas fa-check-circle"></i> Pairing Code Generated
           </h2>
-          <div style="background:white;color:black;padding:30px;margin:25px 0;border-radius:15px;font-size:2.5rem;font-weight:bold;letter-spacing:8px;border:3px solid #1dd1a1;">
+          <div style="background:white;color:black;padding:30px;margin:25px 0;border-radius:15px;font-size:2.5rem;font-weight:bold;letter-spacing:8px;border:3px solid #1dd1a1;font-family: monospace;">
             ${pairCode}
           </div>
-          <p style="margin-bottom:10px;font-size:1.1rem;">
-            <i class="fas fa-mobile-alt"></i> Go to WhatsApp → Linked Devices → Link a Device
-          </p>
+          <div style="background:rgba(29, 209, 161, 0.2);padding:15px;border-radius:10px;margin-bottom:20px;">
+            <p style="margin-bottom:10px;font-size:1.1rem;">
+              <i class="fas fa-mobile-alt"></i> <strong>Steps to Pair:</strong>
+            </p>
+            <ol style="text-align:left;padding-left:20px;">
+              <li>Open WhatsApp on your phone</li>
+              <li>Go to Settings → Linked Devices</li>
+              <li>Tap on "Link a Device"</li>
+              <li>Enter this code when prompted</li>
+            </ol>
+          </div>
           <p style="margin-bottom:30px;color:#f8f9fa;">
-            Enter this code to pair your device
+            <i class="fas fa-clock"></i> This code expires in 20 seconds
           </p>
           <a href="/" style="background:linear-gradient(45deg, #48dbfb, #0abde3);color:white;padding:15px 40px;text-decoration:none;border-radius:12px;font-weight:600;font-size:1.1rem;display:inline-block;">
             <i class="fas fa-arrow-left"></i> Back to Home
@@ -565,11 +651,34 @@ app.post('/generate-pairing-code', async (req, res) => {
       </div>
     `);
   } catch (error) {
+    console.error('❌ Pairing code error:', error);
+    
+    let errorMessage = error.message;
+    if (errorMessage.includes('timeout')) {
+      errorMessage = 'Request timed out. Please try again.';
+    } else if (errorMessage.includes('not connected')) {
+      errorMessage = 'WhatsApp is not connected. Please wait for QR code or connection.';
+    } else if (errorMessage.includes('invalid phone number')) {
+      errorMessage = 'Invalid phone number format. Use: 91XXXXXXXXXX';
+    }
+
     res.send(`
       <div style="text-align:center;padding:50px;color:white;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;">
         <div style="background:rgba(0,0,0,0.8);padding:40px;border-radius:20px;border:2px solid #ff6b6b;">
           <h2 style="color:#ff6b6b;margin-bottom:20px;"><i class="fas fa-times-circle"></i> Pairing Failed</h2>
-          <p style="margin-bottom:30px;background:rgba(255,107,107,0.2);padding:15px;border-radius:10px;">${error.message}</p>
+          <div style="background:rgba(255,107,107,0.2);padding:15px;border-radius:10px;margin-bottom:30px;">
+            <p style="margin-bottom:10px;"><strong>Error Details:</strong></p>
+            <p>${errorMessage}</p>
+          </div>
+          <div style="background:rgba(254,202,87,0.2);padding:15px;border-radius:10px;margin-bottom:20px;">
+            <p><strong>💡 Tips:</strong></p>
+            <ul style="text-align:left;padding-left:20px;">
+              <li>Ensure phone number is in international format</li>
+              <li>Wait for WhatsApp to show "Connected" status</li>
+              <li>Check your internet connection</li>
+              <li>Try scanning QR code instead</li>
+            </ul>
+          </div>
           <a href="/" style="background:linear-gradient(45deg, #ff6b6b, #feca57);color:white;padding:12px 30px;text-decoration:none;border-radius:10px;font-weight:600;">
             <i class="fas fa-arrow-left"></i> Back to Home
           </a>
@@ -578,6 +687,8 @@ app.post('/generate-pairing-code', async (req, res) => {
     `);
   }
 });
+
+// ... (rest of the code remains the same for send-messages, stop, health check, etc.)
 
 app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
   try {
@@ -594,6 +705,10 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
     const delayValue = parseInt(delayTime);
     if (delayValue < 5) {
       throw new Error('Delay must be at least 5 seconds');
+    }
+
+    if (connectionStatus !== 'connected') {
+      throw new Error('WhatsApp is not connected. Please connect first.');
     }
 
     // Process file content
@@ -643,11 +758,17 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
       
       for (const target of targets) {
         try {
-          const jid = target.includes('@g.us') ? target : target + '@s.whatsapp.net';
-          if (MznKing) {
+          const formattedTarget = formatPhoneNumber(target);
+          const jid = formattedTarget.includes('@g.us') ? formattedTarget : formattedTarget + '@s.whatsapp.net';
+          
+          if (MznKing && connectionStatus === 'connected') {
             await MznKing.sendMessage(jid, { text: fullMessage });
             sentCount++;
-            console.log(`✅ Sent to ${target}: ${fullMessage.substring(0, 30)}...`);
+            console.log(`✅ Sent to ${formattedTarget}: ${fullMessage.substring(0, 30)}...`);
+          } else {
+            console.log(`❌ WhatsApp not connected, stopping...`);
+            sendingActive = false;
+            return;
           }
         } catch (err) {
           console.log(`❌ Failed to send to ${target}: ${err.message}`);
@@ -739,7 +860,8 @@ app.get('/health', (req, res) => {
     status: 'OK', 
     timestamp: new Date().toISOString(),
     service: 'WhatsApp Bulk Messenger',
-    whatsappConnected: !!MznKing,
+    whatsappStatus: connectionStatus,
+    whatsappConnected: connectionStatus === 'connected',
     sendingActive: sendingActive,
     port: PORT,
     stats: {
