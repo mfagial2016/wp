@@ -74,7 +74,7 @@ const clearAuthData = () => {
     }
 };
 
-// WhatsApp Connection Function - COMPLETELY NEW APPROACH
+// WhatsApp Connection Function - IMPROVED VERSION
 const connectToWhatsApp = async () => {
     try {
         console.log('🔧 INITIALIZING WHATSAPP CONNECTION...');
@@ -210,6 +210,61 @@ const handleConnectionUpdate = async (update) => {
         }
     } catch (error) {
         console.error('Error in connection update:', error);
+    }
+};
+
+// IMPROVED Pairing Code Function - FIXED VERSION
+const generatePairingCode = async (phoneNumber) => {
+    try {
+        console.log('📞 Attempting to generate pairing code for:', phoneNumber);
+        
+        if (!sock || connectionStatus !== 'connected') {
+            throw new Error('WhatsApp is not connected. Please connect first using QR code.');
+        }
+
+        if (!sock.requestPairingCode) {
+            throw new Error('Pairing code feature is not available in this version. Please use QR code instead.');
+        }
+
+        // Format phone number properly
+        const formattedNumber = phoneNumber.replace(/\D/g, '');
+        if (!formattedNumber) {
+            throw new Error('Invalid phone number format');
+        }
+
+        console.log('🔐 Requesting pairing code...');
+        
+        // Add timeout to prevent hanging
+        const pairingCodePromise = sock.requestPairingCode(formattedNumber);
+        const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('Pairing code request timeout')), 30000);
+        });
+
+        const pairingCode = await Promise.race([pairingCodePromise, timeoutPromise]);
+        
+        if (!pairingCode) {
+            throw new Error('Failed to generate pairing code');
+        }
+
+        console.log('✅ Pairing code generated successfully:', pairingCode);
+        return pairingCode;
+
+    } catch (error) {
+        console.error('❌ Pairing code generation failed:', error);
+        
+        // Enhanced error messages
+        let errorMessage = error.message;
+        if (error.message.includes('not connected')) {
+            errorMessage = 'WhatsApp is not connected. Please scan QR code first.';
+        } else if (error.message.includes('timeout')) {
+            errorMessage = 'Request timed out. Please check your phone number and try again.';
+        } else if (error.message.includes('invalid') || error.message.includes('number')) {
+            errorMessage = 'Invalid phone number format. Please use format: 91XXXXXXXXXX';
+        } else if (error.message.includes('Pairing code feature')) {
+            errorMessage = 'Pairing code feature is temporarily unavailable. Please use QR code authentication.';
+        }
+
+        throw new Error(errorMessage);
     }
 };
 
@@ -556,7 +611,7 @@ app.get('/', (req, res) => {
                 <div class="form-section">
                     <div class="instructions">
                         <strong><i class="fas fa-info-circle"></i> Pair with Phone Number</strong><br>
-                        Enter your phone number to get pairing code
+                        Enter your phone number to get pairing code (Note: QR code method is more reliable)
                     </div>
                     
                     <form action="/generate-pairing-code" method="post">
@@ -674,7 +729,7 @@ app.get('/', (req, res) => {
     `);
 });
 
-// Generate Pairing Code Route
+// FIXED Generate Pairing Code Route
 app.post('/generate-pairing-code', async (req, res) => {
     try {
         const phoneNumber = req.body.phoneNumber;
@@ -683,36 +738,94 @@ app.post('/generate-pairing-code', async (req, res) => {
             throw new Error('Phone number is required');
         }
 
-        // Check connection status
-        if (connectionStatus !== 'connected') {
-            throw new Error('WhatsApp is not connected. Please wait for QR code scanning and connection first.');
-        }
+        console.log('📞 Processing pairing code request for:', phoneNumber);
 
-        if (!sock) {
-            throw new Error('WhatsApp client is not ready. Please try again in a moment.');
-        }
-
-        // Format phone number
-        const formattedNumber = formatPhoneNumber(phoneNumber);
-        console.log('📞 Generating pairing code for:', formattedNumber);
-
-        // Request pairing code with timeout
-        const pairingCode = await sock.requestPairingCode(formattedNumber);
+        // Generate pairing code using the improved function
+        const pairingCode = await generatePairingCode(phoneNumber);
         
         console.log('✅ Pairing code generated successfully');
 
         res.send(`
-            <div style="text-align:center;padding:50px;color:white;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;">
-                <div style="background:rgba(0,0,0,0.9);padding:40px;border-radius:25px;border:3px solid #00ff00;max-width:500px;width:90%;">
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Pairing Code Generated</title>
+                <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+                <style>
+                    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+                    * { margin: 0; padding: 0; box-sizing: border-box; }
+                    body {
+                        font-family: 'Inter', sans-serif;
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        min-height: 100vh;
+                        padding: 20px;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                    }
+                    .container {
+                        background: rgba(0,0,0,0.9);
+                        padding: 40px;
+                        border-radius: 25px;
+                        border: 3px solid #00ff00;
+                        max-width: 500px;
+                        width: 90%;
+                        color: white;
+                        text-align: center;
+                    }
+                    .success-icon {
+                        font-size: 60px;
+                        color: #00ff00;
+                        margin-bottom: 20px;
+                    }
+                    .pairing-code {
+                        background: white;
+                        color: black;
+                        padding: 30px;
+                        margin: 25px 0;
+                        border-radius: 15px;
+                        font-size: 32px;
+                        font-weight: bold;
+                        letter-spacing: 8px;
+                        border: 3px solid #00ff00;
+                        font-family: monospace;
+                    }
+                    .instructions {
+                        background: rgba(0,255,0,0.2);
+                        padding: 20px;
+                        border-radius: 10px;
+                        margin-bottom: 25px;
+                        text-align: left;
+                    }
+                    .btn-back {
+                        background: #00ff00;
+                        color: black;
+                        padding: 15px 40px;
+                        text-decoration: none;
+                        border-radius: 12px;
+                        font-weight: 600;
+                        font-size: 16px;
+                        display: inline-block;
+                        margin-top: 15px;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="success-icon">
+                        <i class="fas fa-check-circle"></i>
+                    </div>
                     <h2 style="color:#00ff00;margin-bottom:25px;font-size:28px;">
-                        <i class="fas fa-check-circle"></i> Pairing Code Generated!
+                        Pairing Code Generated!
                     </h2>
-                    <div style="background:white;color:black;padding:30px;margin:25px 0;border-radius:15px;font-size:32px;font-weight:bold;letter-spacing:8px;border:3px solid #00ff00;font-family: monospace;">
+                    <div class="pairing-code">
                         ${pairingCode}
                     </div>
-                    <div style="background:rgba(0,255,0,0.2);padding:20px;border-radius:10px;margin-bottom:25px;">
+                    <div class="instructions">
                         <p style="font-size:18px;margin-bottom:15px;"><strong>📱 How to Use:</strong></p>
-                        <ol style="text-align:left;padding-left:25px;font-size:16px;">
+                        <ol style="padding-left:25px;font-size:16px;">
                             <li>Open WhatsApp on your phone</li>
                             <li>Go to <strong>Settings → Linked Devices</strong></li>
                             <li>Tap on <strong>"Link a Device"</strong></li>
@@ -720,48 +833,94 @@ app.post('/generate-pairing-code', async (req, res) => {
                             <li>Wait for confirmation</li>
                         </ol>
                     </div>
-                    <a href="/" style="background:#00ff00;color:black;padding:15px 40px;text-decoration:none;border-radius:12px;font-weight:600;font-size:16px;display:inline-block;">
+                    <a href="/" class="btn-back">
                         <i class="fas fa-arrow-left"></i> Back to Dashboard
                     </a>
                 </div>
-            </div>
+            </body>
+            </html>
         `);
 
     } catch (error) {
         console.error('❌ Pairing code error:', error);
         
-        let errorMessage = 'Failed to generate pairing code';
-        if (error.message.includes('not connected')) {
-            errorMessage = 'WhatsApp is not connected. Please scan QR code first.';
-        } else if (error.message.includes('timeout')) {
-            errorMessage = 'Request timed out. Please try again.';
-        } else if (error.message.includes('invalid')) {
-            errorMessage = 'Invalid phone number format. Use: 91XXXXXXXXXX';
-        }
-
         res.send(`
-            <div style="text-align:center;padding:50px;color:white;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;">
-                <div style="background:rgba(0,0,0,0.9);padding:40px;border-radius:25px;border:3px solid #ff0000;max-width:500px;width:90%;">
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Pairing Failed</title>
+                <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+                <style>
+                    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+                    * { margin: 0; padding: 0; box-sizing: border-box; }
+                    body {
+                        font-family: 'Inter', sans-serif;
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        min-height: 100vh;
+                        padding: 20px;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                    }
+                    .container {
+                        background: rgba(0,0,0,0.9);
+                        padding: 40px;
+                        border-radius: 25px;
+                        border: 3px solid #ff0000;
+                        max-width: 500px;
+                        width: 90%;
+                        color: white;
+                        text-align: center;
+                    }
+                    .error-icon {
+                        font-size: 60px;
+                        color: #ff0000;
+                        margin-bottom: 20px;
+                    }
+                    .btn-back {
+                        background: #ff0000;
+                        color: white;
+                        padding: 15px 40px;
+                        text-decoration: none;
+                        border-radius: 12px;
+                        font-weight: 600;
+                        font-size: 16px;
+                        display: inline-block;
+                        margin-top: 15px;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="error-icon">
+                        <i class="fas fa-times-circle"></i>
+                    </div>
                     <h2 style="color:#ff0000;margin-bottom:25px;font-size:28px;">
-                        <i class="fas fa-times-circle"></i> Pairing Failed
+                        Pairing Failed
                     </h2>
                     <div style="background:rgba(255,0,0,0.2);padding:20px;border-radius:10px;margin-bottom:25px;">
                         <p style="font-size:18px;margin-bottom:10px;"><strong>Error:</strong></p>
-                        <p style="font-size:16px;">${errorMessage}</p>
+                        <p style="font-size:16px;">${error.message}</p>
                     </div>
                     <div style="background:rgba(255,165,0,0.2);padding:20px;border-radius:10px;margin-bottom:25px;">
-                        <p style="font-size:16px;"><strong>💡 Tip:</strong> Try scanning the QR code instead - it's faster and more reliable!</p>
+                        <p style="font-size:16px;">
+                            <strong>💡 Recommended Solution:</strong><br>
+                            Use QR Code authentication instead - it's faster and more reliable!
+                        </p>
                     </div>
-                    <a href="/" style="background:#ff0000;color:white;padding:15px 40px;text-decoration:none;border-radius:12px;font-weight:600;font-size:16px;display:inline-block;">
+                    <a href="/" class="btn-back">
                         <i class="fas fa-arrow-left"></i> Try Again
                     </a>
                 </div>
-            </div>
+            </body>
+            </html>
         `);
     }
 });
 
-// ... (send-messages and other routes remain similar to previous version)
+// ... (send-messages and other routes remain the same as before)
 
 app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
     try {
