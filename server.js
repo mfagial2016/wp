@@ -13,7 +13,6 @@ const {
     fetchLatestBaileysVersion
 } = require("@whiskeysockets/baileys");
 const multer = require('multer');
-const QRCode = require('qrcode');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -29,7 +28,6 @@ let stopKey = null;
 let sendingActive = false;
 let sentCount = 0;
 let connectionStatus = 'disconnected';
-let qrCode = null;
 let retryCount = 0;
 const MAX_RETRIES = 3;
 
@@ -74,7 +72,7 @@ const clearAuthData = () => {
     }
 };
 
-// WhatsApp Connection Function - IMPROVED VERSION
+// WhatsApp Connection Function
 const connectToWhatsApp = async () => {
     try {
         console.log('🔧 INITIALIZING WHATSAPP CONNECTION...');
@@ -91,7 +89,7 @@ const connectToWhatsApp = async () => {
         sock = makeWASocket({
             version,
             logger: pino({ level: 'silent' }),
-            printQRInTerminal: true,
+            printQRInTerminal: false, // Disable QR in terminal since we're using pairing codes
             auth: {
                 creds: state.creds,
                 keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'error' })),
@@ -130,31 +128,13 @@ const connectToWhatsApp = async () => {
 
 // Handle connection updates
 const handleConnectionUpdate = async (update) => {
-    const { connection, lastDisconnect, qr, isNewLogin } = update;
+    const { connection, lastDisconnect, qr } = update;
     
     console.log('🔔 CONNECTION UPDATE:', { 
-        connection, 
-        hasQR: !!qr,
-        isNewLogin 
+        connection
     });
 
     try {
-        if (qr) {
-            console.log('📱 QR CODE RECEIVED - READY FOR SCANNING');
-            connectionStatus = 'qr_ready';
-            qrCode = qr;
-            retryCount = 0; // Reset retry count on QR receive
-            
-            // Generate QR code image
-            try {
-                const qrImage = await QRCode.toDataURL(qr);
-                qrCode = qrImage;
-                console.log('✅ QR Code image generated');
-            } catch (qrError) {
-                console.log('QR code image error:', qrError);
-            }
-        }
-
         if (connection === 'connecting') {
             console.log('🔄 CONNECTING TO WHATSAPP...');
             connectionStatus = 'connecting';
@@ -163,7 +143,6 @@ const handleConnectionUpdate = async (update) => {
         if (connection === 'open') {
             console.log('🎉 WHATSAPP CONNECTED SUCCESSFULLY!');
             connectionStatus = 'connected';
-            qrCode = null;
             retryCount = 0;
             
             // Display user info
@@ -218,12 +197,8 @@ const generatePairingCode = async (phoneNumber) => {
     try {
         console.log('📞 Attempting to generate pairing code for:', phoneNumber);
         
-        if (!sock || connectionStatus !== 'connected') {
-            throw new Error('WhatsApp is not connected. Please connect first using QR code.');
-        }
-
-        if (!sock.requestPairingCode) {
-            throw new Error('Pairing code feature is not available in this version. Please use QR code instead.');
+        if (!sock) {
+            throw new Error('WhatsApp is not initialized. Please wait for connection.');
         }
 
         // Format phone number properly
@@ -237,7 +212,7 @@ const generatePairingCode = async (phoneNumber) => {
         // Add timeout to prevent hanging
         const pairingCodePromise = sock.requestPairingCode(formattedNumber);
         const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error('Pairing code request timeout')), 30000);
+            setTimeout(() => reject(new Error('Pairing code request timeout. Please try again.')), 30000);
         });
 
         const pairingCode = await Promise.race([pairingCodePromise, timeoutPromise]);
@@ -255,13 +230,13 @@ const generatePairingCode = async (phoneNumber) => {
         // Enhanced error messages
         let errorMessage = error.message;
         if (error.message.includes('not connected')) {
-            errorMessage = 'WhatsApp is not connected. Please scan QR code first.';
+            errorMessage = 'WhatsApp is not connected. Please try again.';
         } else if (error.message.includes('timeout')) {
             errorMessage = 'Request timed out. Please check your phone number and try again.';
         } else if (error.message.includes('invalid') || error.message.includes('number')) {
             errorMessage = 'Invalid phone number format. Please use format: 91XXXXXXXXXX';
-        } else if (error.message.includes('Pairing code feature')) {
-            errorMessage = 'Pairing code feature is temporarily unavailable. Please use QR code authentication.';
+        } else if (error.message.includes('logged out')) {
+            errorMessage = 'WhatsApp session expired. Please try pairing again.';
         }
 
         throw new Error(errorMessage);
@@ -309,13 +284,6 @@ app.get('/', (req, res) => {
             showPairing: true,
             showMessages: true
         },
-        qr_ready: {
-            status: '📱 SCAN QR CODE',
-            color: '#ff9900',
-            message: 'Scan the QR code with your WhatsApp to connect',
-            showPairing: false,
-            showMessages: false
-        },
         connecting: {
             status: '🔄 CONNECTING...',
             color: '#ffff00',
@@ -333,22 +301,22 @@ app.get('/', (req, res) => {
         logged_out: {
             status: '🔴 LOGGED OUT',
             color: '#ff0000',
-            message: 'Please scan QR code again to reconnect',
-            showPairing: false,
+            message: 'Please use pairing code to reconnect',
+            showPairing: true,
             showMessages: false
         },
         disconnected: {
             status: '🔴 DISCONNECTED',
             color: '#ff0000',
             message: 'Starting connection...',
-            showPairing: false,
+            showPairing: true,
             showMessages: false
         },
         error: {
             status: '🔴 ERROR',
             color: '#ff0000',
             message: 'Connection error, retrying...',
-            showPairing: false,
+            showPairing: true,
             showMessages: false
         }
     };
@@ -428,29 +396,6 @@ app.get('/', (req, res) => {
             .status-message {
                 font-size: 14px;
                 opacity: 0.9;
-            }
-            
-            .qr-section {
-                background: rgba(255, 255, 255, 0.2);
-                border-radius: 15px;
-                padding: 25px;
-                margin: 25px 0;
-                text-align: center;
-                border: 2px dashed rgba(255, 255, 255, 0.3);
-            }
-            
-            .qr-code {
-                background: white;
-                padding: 15px;
-                border-radius: 10px;
-                display: inline-block;
-                margin: 15px 0;
-            }
-            
-            .qr-code img {
-                max-width: 200px;
-                height: auto;
-                border-radius: 5px;
             }
             
             .form-section {
@@ -535,28 +480,6 @@ app.get('/', (req, res) => {
                 font-size: 13px;
             }
             
-            .tab-buttons {
-                display: flex;
-                gap: 10px;
-                margin-bottom: 20px;
-            }
-            
-            .tab-btn {
-                flex: 1;
-                padding: 12px;
-                background: rgba(255, 255, 255, 0.1);
-                border: 1px solid rgba(255, 255, 255, 0.3);
-                border-radius: 10px;
-                color: white;
-                cursor: pointer;
-                transition: all 0.3s ease;
-            }
-            
-            .tab-btn.active {
-                background: rgba(0, 255, 0, 0.3);
-                border-color: #00ff00;
-            }
-            
             .stats {
                 display: grid;
                 grid-template-columns: 1fr 1fr;
@@ -570,6 +493,29 @@ app.get('/', (req, res) => {
                 border-radius: 8px;
                 text-align: center;
                 font-size: 12px;
+            }
+            
+            .success-box {
+                background: rgba(0, 255, 0, 0.2);
+                border: 2px solid #00ff00;
+                border-radius: 15px;
+                padding: 25px;
+                margin: 20px 0;
+                text-align: center;
+            }
+            
+            .pairing-code-display {
+                background: white;
+                color: black;
+                padding: 20px;
+                margin: 20px 0;
+                border-radius: 10px;
+                font-size: 28px;
+                font-weight: bold;
+                letter-spacing: 5px;
+                text-align: center;
+                border: 3px solid #00ff00;
+                font-family: monospace;
             }
         </style>
     </head>
@@ -585,83 +531,60 @@ app.get('/', (req, res) => {
                 <div class="status-message">${config.message}</div>
             </div>
 
-            ${connectionStatus === 'qr_ready' && qrCode ? `
-            <div class="qr-section">
-                <h3><i class="fas fa-qrcode"></i> Scan QR Code</h3>
-                <div class="qr-code">
-                    <img src="${qrCode}" alt="WhatsApp QR Code">
+            ${config.showPairing ? `
+            <div class="form-section">
+                <div class="instructions">
+                    <strong><i class="fas fa-info-circle"></i> Connect WhatsApp</strong><br>
+                    Enter your phone number to get pairing code and connect your WhatsApp account
                 </div>
-                <p style="margin-top: 15px; font-size: 14px;">
-                    <i class="fas fa-mobile-alt"></i> Open WhatsApp → Settings → Linked Devices → Scan QR Code
-                </p>
+                
+                <form action="/generate-pairing-code" method="post">
+                    <div class="form-group">
+                        <label for="phoneNumber"><i class="fas fa-phone"></i> Phone Number</label>
+                        <input type="text" id="phoneNumber" name="phoneNumber" 
+                               placeholder="91XXXXXXXXXX" required 
+                               pattern="[0-9]{10,12}" 
+                               title="Enter 10-12 digit phone number">
+                    </div>
+                    <button type="submit" class="btn-pair">
+                        <i class="fas fa-link"></i> Generate Pairing Code
+                    </button>
+                </form>
             </div>
             ` : ''}
 
-            ${config.showPairing ? `
-            <div class="tab-buttons">
-                <button class="tab-btn active" onclick="showTab('pairing')">
-                    <i class="fas fa-link"></i> Pair Device
-                </button>
-                <button class="tab-btn" onclick="showTab('messages')">
-                    <i class="fas fa-paper-plane"></i> Send Messages
-                </button>
-            </div>
-
-            <div id="pairing-tab">
-                <div class="form-section">
-                    <div class="instructions">
-                        <strong><i class="fas fa-info-circle"></i> Pair with Phone Number</strong><br>
-                        Enter your phone number to get pairing code (Note: QR code method is more reliable)
+            ${config.showMessages ? `
+            <div class="form-section">
+                <form action="/send-messages" method="post" enctype="multipart/form-data">
+                    <div class="form-group">
+                        <label for="targetsInput"><i class="fas fa-bullseye"></i> Target Numbers</label>
+                        <input type="text" id="targetsInput" name="targetsInput" 
+                               placeholder="91XXXXXXXXXX, 91XXXXXXXXXX" required>
                     </div>
                     
-                    <form action="/generate-pairing-code" method="post">
-                        <div class="form-group">
-                            <label for="phoneNumber"><i class="fas fa-phone"></i> Phone Number</label>
-                            <input type="text" id="phoneNumber" name="phoneNumber" 
-                                   placeholder="91XXXXXXXXXX" required 
-                                   pattern="[0-9]{10,12}" 
-                                   title="Enter 10-12 digit phone number">
-                        </div>
-                        <button type="submit" class="btn-pair">
-                            <i class="fas fa-link"></i> Generate Pairing Code
-                        </button>
-                    </form>
-                </div>
-            </div>
-
-            <div id="messages-tab" style="display: none;">
-                <div class="form-section">
-                    <form action="/send-messages" method="post" enctype="multipart/form-data">
-                        <div class="form-group">
-                            <label for="targetsInput"><i class="fas fa-bullseye"></i> Target Numbers</label>
-                            <input type="text" id="targetsInput" name="targetsInput" 
-                                   placeholder="91XXXXXXXXXX, 91XXXXXXXXXX" required>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="messageFile"><i class="fas fa-file-upload"></i> Message File</label>
-                            <input type="file" id="messageFile" name="messageFile" 
-                                   accept=".txt" required>
-                            <small style="color: rgba(255,255,255,0.7);">Upload .txt file with one message per line</small>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="senderName"><i class="fas fa-user"></i> Sender Name</label>
-                            <input type="text" id="senderName" name="senderName" 
-                                   placeholder="Your name" required>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="delayTime"><i class="fas fa-clock"></i> Delay (Seconds)</label>
-                            <input type="number" id="delayTime" name="delayTime" 
-                                   min="5" max="60" value="5" required>
-                        </div>
-                        
-                        <button type="submit" class="btn-start">
-                            <i class="fas fa-play"></i> Start Sending Messages
-                        </button>
-                    </form>
-                </div>
+                    <div class="form-group">
+                        <label for="messageFile"><i class="fas fa-file-upload"></i> Message File</label>
+                        <input type="file" id="messageFile" name="messageFile" 
+                               accept=".txt" required>
+                        <small style="color: rgba(255,255,255,0.7);">Upload .txt file with one message per line</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="senderName"><i class="fas fa-user"></i> Sender Name</label>
+                        <input type="text" id="senderName" name="senderName" 
+                               placeholder="Your name" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="delayTime"><i class="fas fa-clock"></i> Delay (Seconds)</label>
+                        <input type="number" id="delayTime" name="delayTime" 
+                               min="5" max="60" value="5" required>
+                    </div>
+                    
+                    <button type="submit" class="btn-start">
+                        <i class="fas fa-play"></i> Start Sending Messages
+                    </button>
+                </form>
             </div>
             ` : ''}
 
@@ -693,22 +616,6 @@ app.get('/', (req, res) => {
             ` : ''}
 
             <script>
-                // Tab functionality
-                function showTab(tabName) {
-                    // Hide all tabs
-                    document.getElementById('pairing-tab').style.display = 'none';
-                    document.getElementById('messages-tab').style.display = 'none';
-                    
-                    // Remove active class from all buttons
-                    document.querySelectorAll('.tab-btn').forEach(btn => {
-                        btn.classList.remove('active');
-                    });
-                    
-                    // Show selected tab
-                    document.getElementById(tabName + '-tab').style.display = 'block';
-                    event.target.classList.add('active');
-                }
-                
                 // Format phone number input
                 document.getElementById('phoneNumber')?.addEventListener('input', function(e) {
                     this.value = this.value.replace(/\\D/g, '');
@@ -720,7 +627,7 @@ app.get('/', (req, res) => {
                     setTimeout(() => {
                         console.log('🔄 Auto-refreshing for connection status...');
                         window.location.reload();
-                    }, 8000);
+                    }, 5000);
                 }
             </script>
         </div>
@@ -904,12 +811,6 @@ app.post('/generate-pairing-code', async (req, res) => {
                         <p style="font-size:18px;margin-bottom:10px;"><strong>Error:</strong></p>
                         <p style="font-size:16px;">${error.message}</p>
                     </div>
-                    <div style="background:rgba(255,165,0,0.2);padding:20px;border-radius:10px;margin-bottom:25px;">
-                        <p style="font-size:16px;">
-                            <strong>💡 Recommended Solution:</strong><br>
-                            Use QR Code authentication instead - it's faster and more reliable!
-                        </p>
-                    </div>
                     <a href="/" class="btn-back">
                         <i class="fas fa-arrow-left"></i> Try Again
                     </a>
@@ -920,8 +821,7 @@ app.post('/generate-pairing-code', async (req, res) => {
     }
 });
 
-// ... (send-messages and other routes remain the same as before)
-
+// Send Messages Route
 app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
     try {
         const { targetsInput, delayTime, senderName: nameInput } = req.body;
@@ -940,7 +840,7 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
         }
 
         if (connectionStatus !== 'connected') {
-            throw new Error('WhatsApp is not connected. Please connect first.');
+            throw new Error('WhatsApp is not connected. Please connect first using pairing code.');
         }
 
         // Process file content
@@ -1030,6 +930,7 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
     }
 });
 
+// Stop Route
 app.post('/stop', (req, res) => {
     const userKey = req.body.stopKeyInput;
     if (userKey === stopKey) {
