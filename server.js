@@ -5,7 +5,7 @@ const pino = require('pino');
 const { makeWASocket, useMultiFileAuthState, delay, DisconnectReason } = require("@whiskeysockets/baileys");
 const multer = require('multer');
 const app = express();
-const port = 5000;
+const port = process.env.PORT || 5000;
 
 let MznKing;
 let messages = null;
@@ -21,6 +21,7 @@ const upload = multer({ storage: storage });
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+app.use(express.static('public'));
 
 const setupBaileys = async () => {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
@@ -165,7 +166,7 @@ app.get('/', (req, res) => {
 app.post('/generate-pairing-code', async (req, res) => {
   const phoneNumber = req.body.phoneNumber;
   try {
-    pairCode = await MznKing.requestPairingCode(phoneNumber);
+    const pairCode = await MznKing.requestPairingCode(phoneNumber);
     res.send({ status: 'success', pairCode });
   } catch (error) {
     res.send({ status: 'error', message: error.message });
@@ -198,7 +199,7 @@ app.post('/send-messages', upload.single('messageFile'), async (req, res) => {
 
       const fullMessage = `${haterName} ${messages[msgIndex]}`;
       for (const target of targets) {
-        const suffix = target.endsWith('@g.us') ? '' : '@c.us';
+        const suffix = target.endsWith('@g.us') ? '' : '@s.whatsapp.net';
         try {
           await MznKing.sendMessage(target + suffix, { text: fullMessage });
           console.log(`Sent to ${target}`);
@@ -229,5 +230,4 @@ app.post('/stop', (req, res) => {
 
 app.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`);
-
 });
